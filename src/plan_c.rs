@@ -584,12 +584,10 @@ fn esc(s: &str) -> String {
 
 async fn launch_browser() -> Result<Browser, CrawlError> {
     let user_data = std::env::temp_dir().join("chromiumoxide-crawl");
+    // 이전 실행 잔재를 완전히 제거 후 재생성
+    let _ = std::fs::remove_dir_all(&user_data);
     std::fs::create_dir_all(&user_data)
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
-
-    // 강제 종료 후 남는 락 제거
-    let _ = std::fs::remove_file(user_data.join("SingletonLock"));
-    let _ = std::fs::remove_file(user_data.join("SingletonCookie"));
 
     let config = BrowserConfig::builder()
         .with_head()

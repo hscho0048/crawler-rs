@@ -252,10 +252,9 @@ pub async fn run(
 // ─────────────────────────────────────────────────────────────────
 async fn launch_browser() -> Result<Browser, Box<dyn std::error::Error + Send + Sync>> {
     let user_data = std::env::temp_dir().join("chromiumoxide-plan-d");
+    // 이전 실행 잔재를 완전히 제거 후 재생성
+    let _ = std::fs::remove_dir_all(&user_data);
     std::fs::create_dir_all(&user_data)?;
-    // 이전 실행에서 남은 락 제거
-    let _ = std::fs::remove_file(user_data.join("SingletonLock"));
-    let _ = std::fs::remove_file(user_data.join("SingletonCookie"));
 
     let config = BrowserConfig::builder()
         .with_head()
