@@ -1,0 +1,22 @@
+# Claude Code 세션 데이터
+.claude/
+
+# Rust 빌드 산출물
+/target/
+
+# 크롤링 결과
+/out/
+
+# 로그
+*.log
+
+# 쿠키 파일 (민감 정보)
+cookies.json
+*.cookies.json
+
+# 크롬드라이버 바이너리
+chromedriver.exe
+chromedriver
+
+# 배포 패키지
+*.zip
