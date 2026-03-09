@@ -1,10 +1,11 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
-use tokio::sync::Semaphore;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 use url::Url;
@@ -51,6 +52,20 @@ async fn inject_cookies(driver: &WebDriver, cookies: &[CookieEntry]) {
     info!(count = cookies.len(), "쿠키 주입 완료");
 }
 
+/// Chrome 세션을 생성하고 쿠키를 한 번만 주입합니다.
+async fn create_session_with_cookies(
+    webdriver_url: &str,
+    cookies: &[CookieEntry],
+) -> Result<WebDriver, CrawlError> {
+    let driver = open_driver(webdriver_url).await?;
+    if !cookies.is_empty() {
+        if driver.goto("https://cafe.naver.com").await.is_ok() {
+            inject_cookies(&driver, cookies).await;
+        }
+    }
+    Ok(driver)
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 내부 구조체
 // ─────────────────────────────────────────────────────────────────
@@ -69,7 +84,9 @@ struct ArticleRef {
 /// 리스트 페이지 크롤:
 /// 1) URL 파라미터로 페이지 순회 (?page=N&size=50)
 /// 2) 게시글 링크 수집
-/// 3) workers 개 병렬 세션으로 각 게시글 스크랩 + 진행률 출력
+/// 3) workers 개 세션(Worker Pool)으로 게시글 스크랩 + 진행률 출력
+///    - 세션은 시작 시 N개 생성, 쿠키 N번만 주입
+///    - 이후 세션을 재사용하며 계속 크롤
 pub async fn crawl_plan_b_from_list(
     webdriver_url: &str,
     list_url: Url,
@@ -81,24 +98,16 @@ pub async fn crawl_plan_b_from_list(
     let workers = workers.max(1);
     info!(url = %list_url, max_posts, workers, "리스트 크롤 시작");
 
-    // ── 1단계: URL 기반 페이지 순회로 링크 수집 ──────────────────
-    let driver = match open_driver(webdriver_url).await {
+    // ── 1단계: 링크 수집 (전용 세션 1개) ─────────────────────────
+    let list_driver = match create_session_with_cookies(webdriver_url, &cookies).await {
         Ok(d) => d,
         Err(e) => return vec![Err(e)],
     };
-
-    // 쿠키 주입 (가입 카페 접근용)
-    if !cookies.is_empty() {
-        if driver.goto("https://cafe.naver.com").await.is_ok() {
-            inject_cookies(&driver, &cookies).await;
-        }
-    }
-
-    let refs = collect_article_refs_by_url(&driver, &list_url, max_posts).await;
-    let _ = driver.quit().await;
+    let refs = collect_article_refs_by_url(&list_driver, &list_url, max_posts).await;
+    let _ = list_driver.quit().await;
 
     let total = refs.len();
-    info!(total, "게시글 링크 수집 완료 → 병렬 스크랩 시작");
+    info!(total, "게시글 링크 수집 완료 → Worker Pool 스크랩 시작");
 
     if refs.is_empty() {
         return vec![Err(CrawlError::Parse(
@@ -106,68 +115,23 @@ pub async fn crawl_plan_b_from_list(
         ))];
     }
 
-    // ── 2단계: 병렬 스크랩 + 진행률 ─────────────────────────────
-    let sem = Arc::new(Semaphore::new(workers));
-    let done = Arc::new(AtomicUsize::new(0));
-    let mut joinset = JoinSet::new();
-
-    for article_ref in refs {
-        let wd = webdriver_url.to_string();
-        let sem = sem.clone();
-        let done = done.clone();
-        let cookies = cookies.clone();
-        joinset.spawn(async move {
-            let _permit = sem.acquire_owned().await;
-            let result = scrape_post_from_ref(&wd, article_ref, &cookies).await;
-            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            match &result {
-                Ok(p)  => info!("[{n}/{total}] 완료: {}", p.title),
-                Err(e) => warn!("[{n}/{total}] 실패: {e}"),
-            }
-            result
-        });
-    }
-
-    let mut out = Vec::new();
-    while let Some(res) = joinset.join_next().await {
-        match res {
-            Ok(r) => out.push(r),
-            Err(e) => out.push(Err(CrawlError::Parse(format!("join error: {e}")))),
-        }
-    }
-    out
+    // ── 2단계: Worker Pool 스크랩 ─────────────────────────────────
+    scrape_with_pool(webdriver_url, refs, workers, &cookies).await
 }
 
-/// 이미 알고 있는 URL 목록 병렬 스크랩
+/// 이미 알고 있는 URL 목록을 Worker Pool로 병렬 스크랩
 pub async fn crawl_plan_b_parallel(
     webdriver_url: &str,
     urls: Vec<Url>,
     workers: usize,
     cookies: Arc<Vec<CookieEntry>>,
 ) -> Vec<Result<PostData, CrawlError>> {
-    info!(n = urls.len(), workers, "Plan B 병렬 세션");
-    let sem = Arc::new(Semaphore::new(workers.max(1)));
-    let mut joinset = JoinSet::new();
-
-    for url in urls {
-        let wd = webdriver_url.to_string();
-        let sem = sem.clone();
-        let cookies = cookies.clone();
-        joinset.spawn(async move {
-            let _permit = sem.acquire_owned().await;
-            let article = ArticleRef { url, title: String::new(), date: String::new() };
-            scrape_post_from_ref(&wd, article, &cookies).await
-        });
-    }
-
-    let mut out = Vec::new();
-    while let Some(res) = joinset.join_next().await {
-        match res {
-            Ok(r) => out.push(r),
-            Err(e) => out.push(Err(CrawlError::Parse(format!("join error: {e}")))),
-        }
-    }
-    out
+    info!(n = urls.len(), workers, "Plan B Worker Pool 병렬 스크랩");
+    let articles = urls
+        .into_iter()
+        .map(|url| ArticleRef { url, title: String::new(), date: String::new() })
+        .collect();
+    scrape_with_pool(webdriver_url, articles, workers, &cookies).await
 }
 
 /// WebDriver 연결 확인
@@ -181,6 +145,73 @@ pub async fn webdriver_smoke_test(webdriver_url: &str) -> Result<(), CrawlError>
     info!(%title, "webdriver smoke test ok");
     driver.quit().await.map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Worker Pool 핵심 로직
+// ─────────────────────────────────────────────────────────────────
+
+/// workers 개의 Chrome 세션을 미리 생성(쿠키 1회 주입)하고,
+/// 공유 큐에서 게시글을 꺼내 순차 처리하는 Worker Pool.
+async fn scrape_with_pool(
+    webdriver_url: &str,
+    articles: Vec<ArticleRef>,
+    workers: usize,
+    cookies: &Arc<Vec<CookieEntry>>,
+) -> Vec<Result<PostData, CrawlError>> {
+    let total = articles.len();
+    let queue: Arc<Mutex<VecDeque<ArticleRef>>> =
+        Arc::new(Mutex::new(VecDeque::from(articles)));
+    let done = Arc::new(AtomicUsize::new(0));
+    let mut joinset: JoinSet<Vec<Result<PostData, CrawlError>>> = JoinSet::new();
+
+    for worker_id in 0..workers {
+        let wd = webdriver_url.to_string();
+        let queue = queue.clone();
+        let cookies = cookies.clone();
+        let done = done.clone();
+
+        joinset.spawn(async move {
+            // 세션 생성 + 쿠키 주입 (이 워커 수명 동안 1회)
+            let driver = match create_session_with_cookies(&wd, &cookies).await {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("워커 {worker_id} 세션 생성 실패: {e}");
+                    return vec![];
+                }
+            };
+            info!("워커 {worker_id} 준비 완료 (쿠키 주입 완료)");
+
+            let mut results = Vec::new();
+
+            loop {
+                // 큐에서 게시글 1개 가져옴 (락은 pop 직후 즉시 해제)
+                let article = queue.lock().await.pop_front();
+                let Some(article) = article else { break };
+
+                let result = scrape_with_driver(&driver, article).await;
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                match &result {
+                    Ok(p)  => info!("[{n}/{total}] 워커{worker_id} 완료: {}", p.title),
+                    Err(e) => warn!("[{n}/{total}] 워커{worker_id} 실패: {e}"),
+                }
+                results.push(result);
+            }
+
+            let _ = driver.quit().await;
+            info!("워커 {worker_id} 종료");
+            results
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some(res) = joinset.join_next().await {
+        match res {
+            Ok(r)  => out.extend(r),
+            Err(e) => out.push(Err(CrawlError::Parse(format!("join error: {e}")))),
+        }
+    }
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -295,25 +326,19 @@ async fn parse_article_row(row: &WebElement, base_url: &Url) -> Option<ArticleRe
 
 
 // ─────────────────────────────────────────────────────────────────
-// 게시글 페이지 스크랩
+// 게시글 페이지 스크랩 (세션 재사용 버전 — quit 없음)
 // ─────────────────────────────────────────────────────────────────
 
-async fn scrape_post_from_ref(
-    webdriver_url: &str,
+/// 기존 세션(driver)을 받아 게시글 1개를 스크랩합니다.
+/// 세션 생성/종료는 호출자(Worker Pool)가 담당합니다.
+async fn scrape_with_driver(
+    driver: &WebDriver,
     article: ArticleRef,
-    cookies: &[CookieEntry],
 ) -> Result<PostData, CrawlError> {
-    let driver = open_driver(webdriver_url).await?;
-
-    // 쿠키 주입: cafe.naver.com 도메인에 먼저 방문 후 심기
-    if !cookies.is_empty() {
-        if driver.goto("https://cafe.naver.com").await.is_ok() {
-            inject_cookies(&driver, cookies).await;
-        }
-    }
+    // 이전 게시글에서 iframe에 들어가 있을 수 있으므로 최상위 프레임으로 복귀
+    let _ = driver.enter_default_frame().await;
 
     if let Err(e) = driver.goto(article.url.as_str()).await {
-        let _ = driver.quit().await;
         return Err(CrawlError::WebDriver(e.to_string()));
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -339,7 +364,7 @@ async fn scrape_post_from_ref(
     let title = if !article.title.is_empty() {
         article.title.clone()
     } else {
-        let t = find_text(&driver, &[
+        let t = find_text(driver, &[
             "h3.title_text",
             ".ArticleTitle h3",
             ".article_viewer .title_text",
@@ -350,7 +375,7 @@ async fn scrape_post_from_ref(
         .await;
         // 위 셀렉터 전부 실패 시 본문 첫 span으로 백업
         if t.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
-            find_text(&driver, &[".se-main-container .se-text-paragraph span"])
+            find_text(driver, &[".se-main-container .se-text-paragraph span"])
                 .await
                 .unwrap_or_default()
         } else {
@@ -358,17 +383,17 @@ async fn scrape_post_from_ref(
         }
     };
 
-    let author = find_text(&driver, &[".profile_area .profile_info .nickname"])
+    let author = find_text(driver, &[".profile_area .profile_info .nickname"])
         .await
         .unwrap_or_default();
 
-    let author_level = find_text(&driver, &[".profile_area .profile_info .nick_level"])
+    let author_level = find_text(driver, &[".profile_area .profile_info .nick_level"])
         .await
         .unwrap_or_default();
 
     // 날짜: 포스트 페이지 우선 (더 정확), 없으면 리스트 페이지 날짜
     // (.comment_info_date 는 댓글 날짜이므로 제외)
-    let written_at = find_text(&driver, &[
+    let written_at = find_text(driver, &[
         "span.date",
         ".article_info .date",
         ".WriterInfo .date",
@@ -378,15 +403,13 @@ async fn scrape_post_from_ref(
     .await
     .unwrap_or(article.date);
 
-    let views = find_text(&driver, &[".profile_area .article_info .count"])
+    let views = find_text(driver, &[".profile_area .article_info .count"])
         .await
         .unwrap_or_default();
 
-    let body = collect_body_text(&driver).await;
-    let body_images = collect_body_images(&driver).await;
-    let comments = collect_comments(&driver).await;
-
-    let _ = driver.quit().await;
+    let body = collect_body_text(driver).await;
+    let body_images = collect_body_images(driver).await;
+    let comments = collect_comments(driver).await;
 
     if title.trim().is_empty() && body.trim().is_empty() {
         return Err(CrawlError::RequiresJsOrBlocked);
