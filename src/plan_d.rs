@@ -68,7 +68,16 @@ pub async fn run(
                 break;
             }
         };
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // 게시글 행이 나타날 때까지 polling (최대 6초)
+        {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+            loop {
+                let ready = page.evaluate("!!document.querySelector('tr.ub-content.us-post')")
+                    .await.ok().and_then(|v| v.into_value::<bool>().ok()).unwrap_or(false);
+                if ready || tokio::time::Instant::now() >= deadline { break; }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
 
         let list_js = r#"
             Array.from(document.querySelectorAll('tr.ub-content.us-post')).map(tr => {
@@ -125,7 +134,16 @@ pub async fn run(
                 Err(_) => return None,
             };
 
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            // 본문 영역이 나타날 때까지 polling (최대 6초)
+            {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+                loop {
+                    let ready = detail_page.evaluate("!!document.querySelector('.write_div')")
+                        .await.ok().and_then(|v| v.into_value::<bool>().ok()).unwrap_or(false);
+                    if ready || tokio::time::Instant::now() >= deadline { break; }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
 
             let mut is_first_pass = true;
             let mut post_body = String::new();
@@ -198,7 +216,16 @@ pub async fn run(
                 if let Ok(val) = detail_page.evaluate(next_page_js).await {
                     if let Ok(has_next) = val.into_value::<bool>() {
                         if has_next {
-                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                            // 새 댓글이 로드될 때까지 polling (최대 2초)
+                            let before_count = result_comments.len();
+                            let dl = tokio::time::Instant::now() + Duration::from_millis(2000);
+                            loop {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                let count = detail_page
+                                    .evaluate("document.querySelectorAll('ul.cmt_list > li.ub-content').length")
+                                    .await.ok().and_then(|v| v.into_value::<usize>().ok()).unwrap_or(0);
+                                if count != before_count || tokio::time::Instant::now() >= dl { break; }
+                            }
                             continue;
                         }
                     }
@@ -251,13 +278,15 @@ pub async fn run(
 // 유틸리티 함수
 // ─────────────────────────────────────────────────────────────────
 async fn launch_browser() -> Result<Browser, Box<dyn std::error::Error + Send + Sync>> {
-    let user_data = std::env::temp_dir().join("chromiumoxide-plan-d");
-    // 이전 실행 잔재를 완전히 제거 후 재생성
-    let _ = std::fs::remove_dir_all(&user_data);
+    // 실행마다 고유한 디렉토리를 사용해 잠금 충돌 방지
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    let user_data = std::env::temp_dir().join(format!("chromiumoxide-plan-d-{}", unique_id));
     std::fs::create_dir_all(&user_data)?;
 
     let config = BrowserConfig::builder()
-        .with_head()
         .arg("--headless=new")
         .arg("--no-sandbox")
         .arg("--disable-gpu")
@@ -271,8 +300,10 @@ async fn launch_browser() -> Result<Browser, Box<dyn std::error::Error + Send + 
         .build()?;
 
     let (browser, mut handler) = Browser::launch(config).await?;
+    let cleanup_dir = user_data.clone();
     tokio::spawn(async move {
         while let Some(_) = handler.next().await {}
+        let _ = std::fs::remove_dir_all(&cleanup_dir);
     });
     Ok(browser)
 }

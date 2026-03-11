@@ -7,8 +7,9 @@ mod models;
 mod plan_a;
 mod plan_b;
 mod plan_c;
-mod test_mode;
 mod plan_d;
+mod plan_e;
+mod test_mode;
 
 use std::path::Path;
 
@@ -26,6 +27,7 @@ use crate::{
     input::read_urls_from_file,
     plan_b::{crawl_plan_b_from_list, load_cookies, CookieEntry},
     plan_c::{crawl_plan_c_scroll, ScrollConfig},
+    plan_e::{run_plan_e_parallel, write_csv as write_reviews_csv},
     test_mode::{run_smoke_test, TestOptions},
 };
 
@@ -134,6 +136,33 @@ enum Commands {
         /// 결과 저장 디렉토리
         #[arg(long, default_value = "out")]
         out_dir: String,
+    },
+
+    /// 스마트스토어 상품 리뷰 병렬 수집 (ChromeDriver 필요)
+    Smartstore {
+        /// 상품 URL (반복 사용 가능, 예: --url "https://smartstore.naver.com/...")
+        #[arg(long)]
+        url: Vec<String>,
+
+        /// 상품 URL 목록 파일 (한 줄에 URL 하나)
+        #[arg(long)]
+        input: Option<String>,
+
+        /// 병렬 Chrome 세션 수
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+
+        /// WebDriver 엔드포인트 (예: http://localhost:4444)
+        #[arg(long)]
+        webdriver: String,
+
+        /// 결과 CSV 저장 경로
+        #[arg(long, default_value = "out/smartstore_reviews.csv")]
+        output: String,
+
+        /// 헤드리스 모드 (화면 없이 실행)
+        #[arg(long, default_value_t = false)]
+        headless: bool,
     },
 
     /// Crawl URLs (file and/or repeated --url)
@@ -267,6 +296,38 @@ async fn main() -> Result<(), CrawlError> {
             write_comments_csv(out_dir_path, &posts)
                 .map_err(|e| CrawlError::Parse(format!("csv 저장 오류: {e}")))?;
             info!(out_dir, "CSV 저장 완료");
+        }
+
+        Commands::Smartstore { url, input, workers, webdriver, output, headless } => {
+            let mut urls: Vec<String> = url;
+            if let Some(path) = input {
+                let parsed = read_urls_from_file(Path::new(&path))?;
+                urls.extend(parsed.into_iter().map(|u| u.to_string()));
+            }
+            if urls.is_empty() {
+                return Err(CrawlError::Parse(
+                    "URL이 없습니다. --url 또는 --input을 지정하세요.".to_string(),
+                ));
+            }
+
+            // 출력 디렉토리 생성
+            if let Some(parent) = Path::new(&output).parent() {
+                if !parent.as_os_str().is_empty() {
+                    ensure_out_dir(parent)
+                        .map_err(|e| CrawlError::Parse(format!("출력 디렉토리 생성 실패: {e}")))?;
+                }
+            }
+
+            info!(total = urls.len(), workers, headless, "Plan E 스마트스토어 리뷰 수집 시작");
+            let rows = run_plan_e_parallel(&webdriver, urls, workers, headless)
+                .await
+                .map_err(|e| CrawlError::Parse(format!("Plan E 오류: {e}")))?;
+
+            info!(reviews = rows.len(), output, "CSV 저장");
+            write_reviews_csv(&output, &rows)
+                .map_err(|e| CrawlError::Parse(format!("CSV 저장 실패: {e}")))?;
+
+            info!(output, "완료");
         }
 
         Commands::Scrape { url, max_posts, workers, out_dir } => {

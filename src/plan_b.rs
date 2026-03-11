@@ -235,7 +235,26 @@ async fn collect_article_refs_by_url(
             warn!("페이지 {page} 이동 실패: {e}");
             break;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // 게시글 테이블이 렌더링될 때까지 최대 5초 폴링 (고정 2초 sleep 대체)
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let ready = driver
+                    .execute(
+                        "return document.querySelector('table.article-table') !== null;",
+                        vec![],
+                    )
+                    .await
+                    .ok()
+                    .and_then(|v| v.json().as_bool())
+                    .unwrap_or(false);
+                if ready || std::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
 
         let rows = scrape_page_rows(driver, &page_url).await;
         let count = rows.len();
@@ -283,45 +302,46 @@ fn build_page_url(base: &Url, page: u32) -> Url {
     url
 }
 
-/// 현재 페이지 테이블에서 일반글 row 파싱 (공지 제외)
+/// 현재 페이지 테이블에서 일반글 row 파싱 (공지 제외) — JS 단일 호출로 일괄 추출
 async fn scrape_page_rows(driver: &WebDriver, base_url: &Url) -> Vec<ArticleRef> {
-    let rows = driver
-        .find_all(By::Css("table.article-table > tbody > tr:not(.board-notice)"))
-        .await
-        .unwrap_or_default();
+    let script = r#"
+        const rows = document.querySelectorAll('table.article-table > tbody > tr:not(.board-notice)');
+        return Array.from(rows).map(row => {
+            const link = row.querySelector('a.article');
+            const date = row.querySelector('td.type_date');
+            return {
+                href:  link ? (link.getAttribute('href') || '') : '',
+                title: link ? (link.textContent || '').trim() : '',
+                date:  date ? (date.textContent || '').trim() : '',
+            };
+        }).filter(r => r.href);
+    "#;
+
+    let val = match driver.execute(script, vec![]).await {
+        Ok(v)  => v,
+        Err(e) => { warn!("JS row 추출 실패: {e}"); return vec![]; }
+    };
+
+    let arr = match val.json().as_array() {
+        Some(a) => a.clone(),
+        None    => return vec![],
+    };
 
     let mut articles = Vec::new();
-    for row in &rows {
-        if let Some(a) = parse_article_row(row, base_url).await {
-            articles.push(a);
-        }
+    for item in arr {
+        let href  = item.get("href").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let date  = item.get("date").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        if href.is_empty() { continue; }
+        let url = if href.starts_with("http") {
+            match Url::parse(&href) { Ok(u) => u, Err(_) => continue }
+        } else {
+            match base_url.join(&href) { Ok(u) => u, Err(_) => continue }
+        };
+        articles.push(ArticleRef { url, title, date });
     }
     articles
-}
-
-/// 단일 row에서 URL / 제목 / 날짜 추출
-async fn parse_article_row(row: &WebElement, base_url: &Url) -> Option<ArticleRef> {
-    // 제목 링크 (a.article)
-    let link_elem = row.find(By::Css("a.article")).await.ok()?;
-    let href = link_elem.attr("href").await.ok()??;
-
-    let url = if href.starts_with("http") {
-        Url::parse(&href).ok()?
-    } else {
-        base_url.join(&href).ok()?
-    };
-
-    // 제목 텍스트 (head 접두사 포함)
-    let title = link_elem.text().await.unwrap_or_default().trim().to_string();
-
-    // 작성일 (td.type_date)
-    let date = if let Ok(date_elem) = row.find(By::Css("td.type_date")).await {
-        date_elem.text().await.unwrap_or_default().trim().to_string()
-    } else {
-        String::new()
-    };
-
-    Some(ArticleRef { url, title, date })
 }
 
 
@@ -341,23 +361,34 @@ async fn scrape_with_driver(
     if let Err(e) = driver.goto(article.url.as_str()).await {
         return Err(CrawlError::WebDriver(e.to_string()));
     }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // cafe_main iframe이 DOM에 나타날 때까지 최대 5초 폴링 (고정 2초 sleep 대체)
+    let iframe_idx: Option<u16> = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(val) = driver
+                .execute(
+                    "const frames = Array.from(document.querySelectorAll('iframe')); \
+                     return frames.findIndex(f => f.id === 'cafe_main');",
+                    vec![],
+                )
+                .await
+            {
+                if let Some(idx) = val.json().as_i64().filter(|&i| i >= 0) {
+                    break Some(idx as u16);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
 
     // Naver Cafe는 본문/댓글이 모두 cafe_main iframe 안에 있음
-    // JS로 iframe index를 동적으로 찾아 전환 (thirtyfour 0.35 = u16 index만 지원)
-    if let Ok(val) = driver
-        .execute(
-            "const frames = Array.from(document.querySelectorAll('iframe')); \
-             return frames.findIndex(f => f.id === 'cafe_main');",
-            vec![],
-        )
-        .await
-    {
-        if let Some(idx) = val.json().as_i64().filter(|&i| i >= 0) {
-            if driver.enter_frame(idx as u16).await.is_ok() {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        }
+    if let Some(idx) = iframe_idx {
+        let _ = driver.enter_frame(idx).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     // 제목: 리스트 페이지 값 우선, 없으면 포스트 페이지에서
@@ -434,48 +465,35 @@ async fn scrape_with_driver(
 // ─────────────────────────────────────────────────────────────────
 
 async fn collect_body_text(driver: &WebDriver) -> String {
-    let body_selectors = [
-        ".se-main-container",
-        ".article_viewer .content.CafeViewer",
-        ".ContentRenderer",
-        ".ArticleContentBox .article_viewer",
-        ".article_container .content",
-    ];
-
-    for css in &body_selectors {
-        let Ok(container) = driver.find(By::Css(*css)).await else { continue };
-
-        // Smart Editor(SE) 구조면 span 단위로 추출해 줄바꿈 보존
-        let paras = container
-            .find_all(By::Css(".se-text-paragraph span"))
-            .await
-            .unwrap_or_default();
-        if !paras.is_empty() {
-            let mut lines = Vec::new();
-            for p in &paras {
-                if let Ok(t) = p.text().await {
-                    let s = t.trim().to_string();
-                    if !s.is_empty() {
-                        lines.push(s);
-                    }
-                }
+    // 여러 셀렉터 + SE span 추출을 단일 JS 호출로 처리
+    let js = r#"
+    (() => {
+        const selectors = [
+            '.se-main-container',
+            '.article_viewer .content.CafeViewer',
+            '.ContentRenderer',
+            '.ArticleContentBox .article_viewer',
+            '.article_container .content',
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const spans = Array.from(el.querySelectorAll('.se-text-paragraph span'));
+            if (spans.length) {
+                const t = spans.map(s => s.textContent.trim()).filter(Boolean).join('\n');
+                if (t) return t;
             }
-            let result = lines.join("\n");
-            if !result.is_empty() {
-                return result;
-            }
+            const t = (el.innerText || el.textContent || '').trim();
+            if (t) return t;
         }
+        return '';
+    })()
+    "#;
 
-        // 일반 구조: 컨테이너 전체 텍스트
-        if let Ok(t) = container.text().await {
-            let s = t.trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
+    match driver.execute(js, vec![]).await {
+        Ok(v) => v.json().as_str().unwrap_or("").trim().to_string(),
+        Err(_) => String::new(),
     }
-
-    String::new()
 }
 
 async fn collect_body_images(driver: &WebDriver) -> Vec<BodyImage> {
@@ -528,99 +546,84 @@ async fn collect_body_images(driver: &WebDriver) -> Vec<BodyImage> {
 // ─────────────────────────────────────────────────────────────────
 
 async fn collect_comments(driver: &WebDriver) -> Vec<Comment> {
-    // ── 1) 페이지 하단까지 스크롤 → IntersectionObserver 트리거 ──────────
-    for _ in 0..3 {
-        let _ = driver
-            .execute("window.scrollTo(0, document.body.scrollHeight);", vec![])
-            .await;
+    // 스크롤 + 댓글 영역 노출
+    let _ = driver.execute("window.scrollTo(0, document.body.scrollHeight);", vec![]).await;
+    let _ = driver.execute(
+        "const el = document.querySelector('.CommentBox, #comment, .comment_area'); \
+         if (el) el.scrollIntoView({block: 'center'});",
+        vec![],
+    ).await;
+
+    // CommentItem이 나타날 때까지 polling (최대 8초, 300ms 간격)
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let found = driver
+            .execute("return !!document.querySelector('ul.comment_list li.CommentItem');", vec![])
+            .await
+            .ok()
+            .and_then(|v| v.json().as_bool())
+            .unwrap_or(false);
+        if found || std::time::Instant::now() >= deadline { break; }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    // ── 2) CommentBox 명시적 스크롤 ──────────────────────────────────────
-    let _ = driver
-        .execute(
-            "const el = document.querySelector('.CommentBox, #comment, .comment_area'); \
-             if (el) el.scrollIntoView({block: 'center'});",
-            vec![],
-        )
-        .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // ── 3) li.CommentItem 이 나타날 때까지 최대 10초 폴링 ───────────────
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // "더보기" 반복 클릭 (클릭 후 DOM 변화 감지, 최대 500ms 대기)
     loop {
-        let found = driver
-            .find_all(By::Css("ul.comment_list li.CommentItem"))
-            .await
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        if found || std::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    // ── 6) "더보기" 반복 클릭 ────────────────────────────────────────────
-    loop {
-        match driver
-            .find(By::Css(".btn_more_comment, .CommentMore button, .btn_more"))
-            .await
-        {
+        match driver.find(By::Css(".btn_more_comment, .CommentMore button, .btn_more")).await {
             Ok(btn) if btn.is_displayed().await.unwrap_or(false) => {
-                if btn.click().await.is_err() {
-                    break;
+                let before: i64 = driver
+                    .execute("return document.querySelectorAll('ul.comment_list li.CommentItem').length;", vec![])
+                    .await.ok().and_then(|v| v.json().as_i64()).unwrap_or(0);
+                if btn.click().await.is_err() { break; }
+                let wait_dl = std::time::Instant::now() + Duration::from_millis(500);
+                loop {
+                    let after: i64 = driver
+                        .execute("return document.querySelectorAll('ul.comment_list li.CommentItem').length;", vec![])
+                        .await.ok().and_then(|v| v.json().as_i64()).unwrap_or(0);
+                    if after > before || std::time::Instant::now() >= wait_dl { break; }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(800)).await;
             }
             _ => break,
         }
     }
 
-    let items = driver
-        .find_all(By::Css("ul.comment_list li.CommentItem"))
-        .await
-        .unwrap_or_default();
-
-    let mut comments = Vec::new();
-    for item in &items {
-        let comment_id = item.attr("id").await.ok().flatten().unwrap_or_default();
-        let class = item.attr("class").await.ok().flatten().unwrap_or_default();
-        let is_reply = class.contains("CommentItem--reply");
-
-        let author = elem_text(item, ".comment_nickname").await;
-        let date = elem_text(item, ".comment_info_date").await.unwrap_or_default();
-        let content = elem_text(item, ".comment_text_box .text_comment").await.unwrap_or_default();
-        let content = normalize_ws(&content);
-
-        if content.is_empty() {
-            continue;
-        }
-
-        let author_avatar = elem_attr(item, "a.comment_thumb img", "src").await;
-        let author_level_icon =
-            elem_attr(item, ".comment_nick_box .LevelIcon.icon_level", "style")
-                .await
-                .and_then(|s| extract_bg_url(&s));
-
-        comments.push(Comment {
-            comment_id,
-            is_reply,
-            author,
-            author_level_icon,
-            author_avatar,
-            date,
-            content,
-        });
+    // 댓글 전체를 단일 JS 호출로 추출
+    #[derive(serde::Deserialize)]
+    struct RawComment {
+        comment_id: String,
+        is_reply: bool,
+        author: Option<String>,
+        date: String,
+        content: String,
     }
-    comments
-}
 
-fn extract_bg_url(style: &str) -> Option<String> {
-    let start = style.find("url(")? + 4;
-    let rest = &style[start..];
-    let end = rest.find(')')?;
-    let url = rest[..end].trim_matches(|c| c == '"' || c == '\'').to_string();
-    if url.is_empty() { None } else { Some(url) }
+    let js = r#"
+    Array.from(document.querySelectorAll('ul.comment_list li.CommentItem')).map(item => {
+        const comment_id = item.getAttribute('id') || '';
+        const is_reply = (item.getAttribute('class') || '').includes('CommentItem--reply');
+        const author = item.querySelector('.comment_nickname')?.textContent?.trim() || null;
+        const date = item.querySelector('.comment_info_date')?.textContent?.trim() || '';
+        const raw = item.querySelector('.comment_text_box .text_comment')?.textContent || '';
+        const content = raw.replace(/\s+/g, ' ').trim();
+        return { comment_id, is_reply, author, date, content };
+    }).filter(x => x.content)
+    "#;
+
+    let raw: Vec<RawComment> = match driver.execute(js, vec![]).await {
+        Ok(v) => serde_json::from_value(v.json().clone()).unwrap_or_default(),
+        Err(_) => return vec![],
+    };
+
+    raw.into_iter().map(|c| Comment {
+        comment_id: c.comment_id,
+        is_reply: c.is_reply,
+        author: c.author,
+        author_level_icon: None,
+        author_avatar: None,
+        date: c.date,
+        content: c.content,
+    }).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -628,53 +631,38 @@ fn extract_bg_url(style: &str) -> Option<String> {
 // ─────────────────────────────────────────────────────────────────
 
 async fn find_text(driver: &WebDriver, selectors: &[&str]) -> Option<String> {
-    for css in selectors {
-        if css.starts_with("meta[") {
-            if let Ok(elem) = driver.find(By::Css(*css)).await {
-                if let Ok(Some(v)) = elem.attr("content").await {
-                    let s = v.trim().to_string();
-                    if !s.is_empty() {
-                        return Some(s);
-                    }
-                }
-            }
-            continue;
+    // 셀렉터 목록을 단일 JS 호출로 처리 (WebDriver 왕복 절감)
+    let sels_json = serde_json::to_string(selectors).unwrap_or_else(|_| "[]".to_string());
+    let js = format!(
+        r#"
+        (() => {{
+            const sels = {sels};
+            for (const sel of sels) {{
+                if (sel.startsWith('meta[')) {{
+                    const v = document.querySelector(sel)?.getAttribute('content')?.trim();
+                    if (v) return v;
+                }} else if (sel === 'title') {{
+                    const t = document.title?.trim();
+                    if (t) return t;
+                }} else {{
+                    const el = document.querySelector(sel);
+                    const t = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (t) return t;
+                }}
+            }}
+            return null;
+        }})()
+        "#,
+        sels = sels_json
+    );
+
+    match driver.execute(&js, vec![]).await {
+        Ok(v) => {
+            let s = v.json().as_str()?.trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
         }
-        if *css == "title" {
-            if let Ok(t) = driver.title().await {
-                let s = t.trim().to_string();
-                if !s.is_empty() {
-                    return Some(s);
-                }
-            }
-            continue;
-        }
-        if let Ok(elem) = driver.find(By::Css(*css)).await {
-            if let Ok(t) = elem.text().await {
-                let s = normalize_ws(&t);
-                if !s.is_empty() {
-                    return Some(s);
-                }
-            }
-        }
+        Err(_) => None,
     }
-    None
-}
-
-async fn elem_text(parent: &WebElement, css: &str) -> Option<String> {
-    let child = parent.find(By::Css(css)).await.ok()?;
-    let t = child.text().await.ok()?;
-    let s = t.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-async fn elem_attr(parent: &WebElement, css: &str, attr: &str) -> Option<String> {
-    let child = parent.find(By::Css(css)).await.ok()?;
-    child.attr(attr).await.ok().flatten().filter(|s| !s.is_empty())
-}
-
-fn normalize_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -691,7 +679,7 @@ async fn open_driver(webdriver_url: &str) -> Result<WebDriver, CrawlError> {
         .await
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     driver
-        .set_implicit_wait_timeout(Duration::from_secs(5))
+        .set_implicit_wait_timeout(Duration::from_millis(0))
         .await
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     Ok(driver)

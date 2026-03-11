@@ -1633,10 +1633,12 @@ dependencies = [
 name = "naver_crawler_engine"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chromiumoxide",
  "clap",
  "csv",
  "futures",
+ "regex",
  "reqwest",
  "scraper",
  "serde",

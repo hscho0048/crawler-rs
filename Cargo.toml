@@ -35,3 +35,7 @@ thirtyfour = "0.35"
 # Plan C (CDP - ChromeDriver 서버 불필요)
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
 futures = "0.3"
+
+# Plan E (Smartstore WebDriver)
+anyhow = "1"
+regex = "1"

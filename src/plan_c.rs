@@ -191,7 +191,21 @@ async fn collect_refs_by_scroll(
         }
     };
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // 카드 셀렉터가 나타날 때까지 polling (최대 8초)
+    {
+        let sel = &config.card_selector;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let ready = page
+                .evaluate(format!("!!document.querySelector({:?})", sel).as_str())
+                .await
+                .ok()
+                .and_then(|v| v.into_value::<bool>().ok())
+                .unwrap_or(false);
+            if ready || tokio::time::Instant::now() >= deadline { break; }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
 
     let href_js = format!(
         "Array.from(document.querySelectorAll('{} {}')).map(a => a.href).filter(Boolean)",
@@ -264,11 +278,40 @@ async fn scrape_detail(
     cookies: &[CookieEntry],
 ) -> Result<PostData, CrawlError> {
     let page = open_page(browser, article.url.as_str(), cookies).await?;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // 타이틀 요소가 나타날 때까지 polling (최대 5초)
+    {
+        let sel = &config.detail_title_selector;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ready = page
+                .evaluate(format!("!!document.querySelector({:?})", sel).as_str())
+                .await
+                .ok()
+                .and_then(|v| v.into_value::<bool>().ok())
+                .unwrap_or(false);
+            if ready || tokio::time::Instant::now() >= deadline { break; }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 
     // 댓글 영역 로드 유도
     let _ = page.evaluate("window.scrollTo(0, document.body.scrollHeight)").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // 댓글 블록이 나타날 때까지 polling (최대 3초)
+    {
+        let sel = &config.detail_comment_block_selector;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let ready = page
+                .evaluate(format!("!!document.querySelector({:?})", sel).as_str())
+                .await
+                .ok()
+                .and_then(|v| v.into_value::<bool>().ok())
+                .unwrap_or(false);
+            if ready || tokio::time::Instant::now() >= deadline { break; }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 
     let title = js_text_one(&page, &config.detail_title_selector)
         .await
@@ -332,11 +375,11 @@ async fn collect_comments(page: &chromiumoxide::Page, config: &ScrollConfig) -> 
 
     loop {
         let _ = page.evaluate("window.scrollTo(0, document.body.scrollHeight)").await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
 
         // 숨겨진 "이전 댓글 n개 더보기" 전부 펼치기
         expand_hidden_reply_comments(page, &config.detail_comment_more_selector).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         let raw_comments = extract_comments_from_current_page(page, config).await;
 
@@ -375,7 +418,7 @@ async fn collect_comments(page: &chromiumoxide::Page, config: &ScrollConfig) -> 
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
     }
 
     out
@@ -468,7 +511,7 @@ async fn expand_hidden_reply_comments(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
     }
 }
 
@@ -583,9 +626,11 @@ fn esc(s: &str) -> String {
 // ─────────────────────────────────────────────────────────────────
 
 async fn launch_browser() -> Result<Browser, CrawlError> {
-    let user_data = std::env::temp_dir().join("chromiumoxide-crawl");
-    // 이전 실행 잔재를 완전히 제거 후 재생성
-    let _ = std::fs::remove_dir_all(&user_data);
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    let user_data = std::env::temp_dir().join(format!("chromiumoxide-crawl-{}", unique_id));
     std::fs::create_dir_all(&user_data)
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
 
@@ -612,8 +657,10 @@ async fn launch_browser() -> Result<Browser, CrawlError> {
         .await
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
 
+    let cleanup_dir = user_data.clone();
     tokio::spawn(async move {
         while let Some(_) = handler.next().await {}
+        let _ = std::fs::remove_dir_all(&cleanup_dir);
     });
 
     Ok(browser)

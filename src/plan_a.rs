@@ -21,6 +21,11 @@ impl PlanAHttpCrawler {
             .connect_timeout(Duration::from_secs(10))
             .cookie_store(true)
             .redirect(reqwest::redirect::Policy::limited(10))
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+                 AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/122.0.0.0 Safari/537.36",
+            )
             .build()?;
         Ok(Self { client })
     }
@@ -57,21 +62,33 @@ impl PlanAHttpCrawler {
     }
 
     async fn fetch_html(&self, url: &Url) -> Result<String, CrawlError> {
-        let resp = self.client.get(url.clone()).send().await?;
-        let status = resp.status();
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(300 * 2u64.pow(attempt - 1))).await;
+            }
 
-        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(CrawlError::Blocked(status));
+            let resp = match self.client.get(url.clone()).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt == 2 { return Err(CrawlError::from(e)); }
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+                return Err(CrawlError::Blocked(status));
+            }
+
+            let text = resp.text().await?;
+            if text.to_lowercase().contains("captcha") || text.contains("로봇") {
+                return Err(CrawlError::RequiresJsOrBlocked);
+            }
+
+            return Ok(text);
         }
 
-        let text = resp.text().await?;
-
-        // Very lightweight heuristic. In production you should do robust classification.
-        if text.to_lowercase().contains("captcha") || text.contains("로봇") {
-            return Err(CrawlError::RequiresJsOrBlocked);
-        }
-
-        Ok(text)
+        unreachable!()
     }
 }
 
