@@ -9,7 +9,7 @@ mod plan_b;
 mod plan_c;
 mod plan_d;
 mod plan_e;
-mod plan_f;
+mod plan_g;
 mod test_mode;
 
 use std::path::Path;
@@ -139,29 +139,6 @@ enum Commands {
         out_dir: String,
     },
 
-    /// 미가입 네이버 카페 크롤링 — 네이버 검색 경유, ChromeDriver 필요 (Plan F)
-    CafeSearch {
-        /// 카페 게시판 URL (예: https://cafe.naver.com/cafename/board 또는 ArticleList.nhn?...)
-        #[arg(long)]
-        url: String,
-
-        /// WebDriver 엔드포인트 (예: http://localhost:4444)
-        #[arg(long)]
-        webdriver: String,
-
-        /// 수집할 최대 게시글 수
-        #[arg(long, default_value_t = 50)]
-        max_posts: usize,
-
-        /// 병렬 워커 수 (2~3 권장)
-        #[arg(long, default_value_t = 2)]
-        workers: usize,
-
-        /// 결과 저장 디렉토리
-        #[arg(long, default_value = "out")]
-        out_dir: String,
-    },
-
     /// 스마트스토어 상품 리뷰 병렬 수집 (ChromeDriver 필요)
     Smartstore {
         /// 상품 URL (반복 사용 가능, 예: --url "https://smartstore.naver.com/...")
@@ -187,6 +164,49 @@ enum Commands {
         /// 헤드리스 모드 (화면 없이 실행)
         #[arg(long, default_value_t = false)]
         headless: bool,
+    },
+
+    /// Reddit 서브레딧 크롤링 (공개 JSON API, ChromeDriver 불필요)
+    Reddit {
+        /// 서브레딧 이름 (예: minimalism)
+        #[arg(long)]
+        subreddit: String,
+
+        /// 정렬 방식 (new | hot | top | rising)
+        #[arg(long, default_value = "new")]
+        sort: String,
+
+        /// 페이지당 게시글 수 (최대 100)
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+
+        /// 최대 페이지 수
+        #[arg(long, default_value_t = 3)]
+        max_pages: usize,
+
+        /// 게시글당 최대 댓글 수
+        #[arg(long, default_value_t = 200)]
+        max_comments: usize,
+
+        /// 키워드 필터 (반복 사용 가능, 없으면 전체 수집)
+        #[arg(long)]
+        keyword: Vec<String>,
+
+        /// 병렬 댓글 수집 워커 수
+        #[arg(long, default_value_t = 5)]
+        workers: usize,
+
+        /// Reddit User-Agent (형식: "platform:appid:v1.0 (by /u/username)")
+        #[arg(long, default_value = "rust:reddit-crawler:v1.0 (by /u/anonymous)")]
+        user_agent: String,
+
+        /// 페이지 사이 딜레이 (ms)
+        #[arg(long, default_value_t = 2000)]
+        page_delay_ms: u64,
+
+        /// 결과 저장 디렉토리
+        #[arg(long, default_value = "out")]
+        out_dir: String,
     },
 
     /// Crawl URLs (file and/or repeated --url)
@@ -354,10 +374,21 @@ async fn main() -> Result<(), CrawlError> {
             info!(output, "완료");
         }
 
-        Commands::CafeSearch { url, webdriver, max_posts, workers, out_dir } => {
-            plan_f::run(&webdriver, &url, max_posts, workers, &out_dir)
-                .await
-                .map_err(|e| CrawlError::Parse(format!("cafe-search 오류: {e}")))?;
+        Commands::Reddit { subreddit, sort, limit, max_pages, max_comments, keyword, workers, user_agent, page_delay_ms, out_dir } => {
+            plan_g::run(plan_g::RedditConfig {
+                subreddit,
+                sort,
+                limit,
+                max_pages,
+                max_comments,
+                keywords: keyword,
+                workers,
+                user_agent,
+                page_delay_ms,
+                out_dir,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("reddit 오류: {e}")))?;
         }
 
         Commands::Scrape { url, max_posts, workers, out_dir } => {

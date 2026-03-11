@@ -11,17 +11,18 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 | **C** | CDP (chromiumoxide) 무한 스크롤 | 오늘의집 등 스크롤 피드형 | X |
 | **D** | CDP (chromiumoxide) 페이지네이션 | DC인사이드 등 게시판형 | X |
 | **E** | WebDriver 병렬 Worker Pool | 스마트스토어 상품 리뷰 | O |
-| **F** | WebDriver + 네이버 검색 경유 | 네이버 카페 (미가입) | O |
+| **G** | reqwest 공개 JSON API | Reddit 서브레딧 | X |
 
 > Plan C / D는 ChromeDriver 없이 Chrome에 직접 CDP로 연결한다. Chrome 설치만 필요.
+> Plan G는 Reddit 공개 JSON API를 사용하므로 Chrome, ChromeDriver, 계정 모두 불필요.
 
 ---
 
 ## 빌드 요구사항
 
 - Rust stable (2021 edition)
-- Chrome 브라우저 (Plan C / D / F)
-- ChromeDriver (Plan B / E / F, Chrome 버전과 일치해야 함)
+- Chrome 브라우저 (Plan C / D)
+- ChromeDriver (Plan B / E, Chrome 버전과 일치해야 함)
 
 ```
 cargo build --release
@@ -208,34 +209,54 @@ https://smartstore.naver.com/store2/products/222
 
 ---
 
-## Plan F — 네이버 카페 크롤링 (미가입 카페)
+## Plan G — Reddit 서브레딧 크롤링
 
-가입하지 않은 카페의 게시글을 네이버 검색을 경유해 수집한다. 제목으로 검색 후 해당 카페 링크를 찾아 본문을 읽는다.
+Reddit 공개 JSON API(`reddit.com/r/{subreddit}.json`)를 사용한다.
+Chrome, ChromeDriver, Reddit 계정 모두 불필요.
+게시글 목록을 순차 수집 + 게시글별 댓글을 병렬 수집한다.
 
-### 사전 준비
+### 출력 파일
 
-```
-chromedriver.exe --port=4444
-```
+| 파일 | 내용 |
+|------|------|
+| `reddit_posts.csv` | 게시글 (제목, 본문, 작성자, 점수, URL 등) |
+| `reddit_comments.csv` | 댓글 전체 (대댓글 포함, depth 컬럼으로 구분) |
 
 ### 명령어
 
 ```
-cargo run --release -- cafe-search --url "https://cafe.naver.com/cafename/board" --webdriver http://localhost:4444 --max-posts 50 --workers 2 --out-dir ./out
+# 기본 수집 (minimalism 서브레딧, 최신순 3페이지)
+cargo run --release -- reddit --subreddit minimalism --sort new --max-pages 3 --workers 3 --out-dir ./out
 
-cargo run --release -- cafe-search --url "https://cafe.naver.com/ArticleList.nhn?search.clubid=12345&search.menuid=123" --webdriver http://localhost:4444 --max-posts 100 --workers 2 --out-dir ./out
+# 키워드 필터 (제목+본문에 단어가 포함된 게시글만 수집)
+cargo run --release -- reddit --subreddit minimalism --keyword "capsule wardrobe" --keyword "closet" --out-dir ./out
+
+# 인기순, 댓글 많이
+cargo run --release -- reddit --subreddit malefashionadvice --sort hot --max-pages 5 --max-comments 500 --workers 5 --out-dir ./out
 ```
-
-> 검색 요청이 많을 경우 네이버에서 차단될 수 있으므로 `--workers`는 2~3을 권장한다.
 
 ### 주요 옵션
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
-| `--url` | — | 카페 게시판 URL (필수) |
-| `--webdriver` | — | ChromeDriver 엔드포인트 (필수) |
-| `--max-posts` | 50 | 수집할 최대 게시글 수 |
-| `--workers` | 2 | 병렬 워커 수 |
+| `--subreddit` | — | 서브레딧 이름 (필수) |
+| `--sort` | `new` | 정렬 방식 (`new` / `hot` / `top` / `rising`) |
+| `--limit` | 100 | 페이지당 최대 게시글 수 (Reddit 최대 100) |
+| `--max-pages` | 3 | 최대 페이지 수 |
+| `--max-comments` | 200 | 게시글당 최대 댓글 수 |
+| `--keyword` | — | 키워드 필터 (반복 사용 가능, 없으면 전체) |
+| `--workers` | 5 | 댓글 병렬 수집 동시성 |
+| `--page-delay-ms` | 2000 | 페이지 요청 사이 딜레이 (ms) |
+| `--user-agent` | `rust:reddit-crawler:v1.0 (by /u/anonymous)` | HTTP User-Agent |
+| `--out-dir` | `out` | 결과 저장 디렉토리 |
+
+### Rate Limit 대응
+
+Reddit 공개 API는 요청이 많으면 `429 Too Many Requests`를 반환한다.
+
+- `Retry-After` 헤더가 있으면 그 시간(초)만큼 자동 대기 후 재시도 (없으면 120초)
+- `--page-delay-ms 3000` 이상으로 설정하면 429 빈도가 줄어든다
+- `--workers`를 낮추면 댓글 수집 동시 요청 수가 줄어든다
 
 ---
 
