@@ -71,10 +71,10 @@ async fn create_session_with_cookies(
 // ─────────────────────────────────────────────────────────────────
 
 /// 리스트 페이지에서 수집한 게시글 기본 정보
-struct ArticleRef {
-    url: Url,
-    title: String,
-    date: String,
+pub struct ArticleRef {
+    pub url: Url,
+    pub title: String,
+    pub date: String,
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -219,7 +219,7 @@ async fn scrape_with_pool(
 // ─────────────────────────────────────────────────────────────────
 
 /// ?page=N&size=50 파라미터로 페이지를 순회하며 링크 수집
-async fn collect_article_refs_by_url(
+pub async fn collect_article_refs_by_url(
     driver: &WebDriver,
     base_url: &Url,
     max: usize,
@@ -349,17 +349,62 @@ async fn scrape_page_rows(driver: &WebDriver, base_url: &Url) -> Vec<ArticleRef>
 // 게시글 페이지 스크랩 (세션 재사용 버전 — quit 없음)
 // ─────────────────────────────────────────────────────────────────
 
+/// SPA 형식 URL → 구형 ArticleRead.nhn 형식으로 변환
+/// /f-e/cafes/{clubid}/articles/{articleid}   → ArticleRead.nhn?clubid=...&articleid=...
+/// /ca-fe/cafes/{clubid}/articles/{articleid} → ArticleRead.nhn?clubid=...&articleid=...
+fn to_article_read_url(url: &Url) -> Option<Url> {
+    if url.host_str() != Some("cafe.naver.com") {
+        return None;
+    }
+    let segs: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() >= 5
+        && (segs[0] == "ca-fe" || segs[0] == "f-e")
+        && segs[1] == "cafes"
+        && segs[3] == "articles"
+        && segs[2].chars().all(|c| c.is_ascii_digit())
+        && segs[4].chars().all(|c| c.is_ascii_digit())
+    {
+        let new_url = format!(
+            "https://cafe.naver.com/ArticleRead.nhn?clubid={}&articleid={}",
+            segs[2], segs[4]
+        );
+        return Url::parse(&new_url).ok();
+    }
+    None
+}
+
 /// 기존 세션(driver)을 받아 게시글 1개를 스크랩합니다.
 /// 세션 생성/종료는 호출자(Worker Pool)가 담당합니다.
-async fn scrape_with_driver(
+pub async fn scrape_with_driver(
     driver: &WebDriver,
     article: ArticleRef,
 ) -> Result<PostData, CrawlError> {
     // 이전 게시글에서 iframe에 들어가 있을 수 있으므로 최상위 프레임으로 복귀
     let _ = driver.enter_default_frame().await;
 
-    if let Err(e) = driver.goto(article.url.as_str()).await {
+    warn!("  [스크랩시작] article.url={}", article.url);
+
+    // SPA URL(/ca-fe/cafes/.../articles/...)은 직접 접근 시 Vue 앱이 빈 렌더링을 반환하므로
+    // 구형 ArticleRead.nhn 형식으로 변환하여 cafe_main iframe 방식으로 렌더링
+    let navigate_url = to_article_read_url(&article.url)
+        .unwrap_or_else(|| article.url.clone());
+
+    warn!("  [navigate_url] {}", navigate_url);
+
+    if let Err(e) = driver.goto(navigate_url.as_str()).await {
         return Err(CrawlError::WebDriver(e.to_string()));
+    }
+
+    // 실제로 어느 URL에 도달했는지, 쿠키 상태 확인
+    if let Ok(cur) = driver.current_url().await {
+        warn!("  [도달URL] {}", cur);
+    }
+    {
+        let cookie_val = driver.execute(
+            "return document.cookie.split(';').map(c => c.trim().split('=')[0]).join(',');",
+            vec![],
+        ).await.ok().and_then(|v| v.json().as_str().map(|s| s.to_string()));
+        warn!("  [쿠키목록] {}", cookie_val.as_deref().unwrap_or("(없음)"));
     }
 
     // cafe_main iframe이 DOM에 나타날 때까지 최대 5초 폴링 (고정 2초 sleep 대체)
@@ -389,6 +434,77 @@ async fn scrape_with_driver(
     if let Some(idx) = iframe_idx {
         let _ = driver.enter_frame(idx).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // 본문 텍스트가 실제로 렌더링될 때까지 대기 (최대 10초)
+    // .article_viewer 존재 여부만으로는 부족 — 실제 텍스트가 10자 이상일 때까지 대기
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ready = driver
+                .execute(
+                    "const spans = document.querySelectorAll('.se-text-paragraph span, .se-module-text span'); \
+                     if (Array.from(spans).some(s => s.textContent.trim().length > 0)) return true; \
+                     const containers = ['.se-main-container', '.article_viewer .content.CafeViewer', \
+                                         '.ArticleContentBox .content_wrapper', '.ContentRenderer']; \
+                     for (const sel of containers) { \
+                         const el = document.querySelector(sel); \
+                         if (el && (el.innerText || el.textContent || '').trim().length > 10) return true; \
+                     } \
+                     return false;",
+                    vec![],
+                )
+                .await.ok().and_then(|v| v.json().as_bool()).unwrap_or(false);
+            if ready || std::time::Instant::now() >= deadline { break; }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
+    // 401 원인 파악: article API 직접 호출 (execute_async 사용)
+    {
+        let api_test_js = r#"
+            const done = arguments[arguments.length - 1];
+            const m = window.location.href.match(/cafes\/(\d+)\/articles\/(\d+)/);
+            if (!m) { done('URL 패턴 불일치'); return; }
+            const [, cafeId, articleId] = m;
+            const url = 'https://article.cafe.naver.com/gw/v4/cafes/' + cafeId + '/articles/' + articleId + '?query=&useCafeId=true&requestFrom=A';
+            fetch(url, {credentials: 'include', headers: {'Accept': 'application/json'}})
+                .then(function(r) {
+                    return r.text().then(function(t) {
+                        done(JSON.stringify({status: r.status, body: t.slice(0, 500)}));
+                    });
+                })
+                .catch(function(e) { done('error: ' + e.message); });
+        "#;
+        let api_diag = driver.execute_async(api_test_js, vec![]).await
+            .ok().and_then(|v| v.json().as_str().map(|s| s.to_string()));
+        warn!("  [API직접호출] {}", api_diag.as_deref().unwrap_or("js 실패"));
+    }
+
+    // 진단: 현재 프레임/URL 상태 + SPA API 호출 목록 확인
+    {
+        let diag = driver.execute(r#"
+            const bodySnippet = (document.body ? document.body.innerHTML : '').slice(0, 400).replace(/\s+/g, ' ');
+            const apiCalls = performance.getEntriesByType('resource')
+                .filter(r => !r.name.match(/\.(js|css|png|jpg|gif|woff|woff2|svg|ico)(\?|$)/i)
+                            && !r.name.includes('ntm.pstatic') && !r.name.includes('chunk-'))
+                .map(r => ({
+                    url: r.name.replace('https://cafe.naver.com', '').substring(0, 120),
+                    status: r.responseStatus !== undefined ? r.responseStatus : '?',
+                    ms: Math.round(r.duration),
+                }));
+            return JSON.stringify({
+                url: window.location.href,
+                title: document.title,
+                has_article_viewer: !!document.querySelector('.article_viewer'),
+                has_se_main: !!document.querySelector('.se-main-container'),
+                se_main_text_len: ((document.querySelector('.se-main-container') || {}).innerText || '').trim().length,
+                comment_count: document.querySelectorAll('ul.comment_list li.CommentItem').length,
+                iframe_count: document.querySelectorAll('iframe').length,
+                api_calls: apiCalls,
+            });
+        "#, vec![]).await.ok().and_then(|v| v.json().as_str().map(|s| s.to_string()));
+        info!("  [본문진단] {}", diag.as_deref().unwrap_or("js 실패"));
     }
 
     // 제목: 리스트 페이지 값 우선, 없으면 포스트 페이지에서
@@ -465,41 +581,44 @@ async fn scrape_with_driver(
 // ─────────────────────────────────────────────────────────────────
 
 async fn collect_body_text(driver: &WebDriver) -> String {
-    // 여러 셀렉터 + SE span 추출을 단일 JS 호출로 처리
     let js = r#"
-    (() => {
-        const selectors = [
-            '.se-main-container',
-            '.article_viewer .content.CafeViewer',
-            '.ContentRenderer',
-            '.ArticleContentBox .article_viewer',
-            '.article_container .content',
-        ];
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (!el) continue;
-            const spans = Array.from(el.querySelectorAll('.se-text-paragraph span'));
-            if (spans.length) {
-                const t = spans.map(s => s.textContent.trim()).filter(Boolean).join('\n');
-                if (t) return t;
-            }
-            const t = (el.innerText || el.textContent || '').trim();
+    const selectors = [
+        '.se-main-container',
+        '.article_viewer .content.CafeViewer',
+        '.ContentRenderer',
+        '.ArticleContentBox .article_viewer',
+        '.article_container .content',
+    ];
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const spans = Array.from(el.querySelectorAll('.se-text-paragraph span'));
+        if (spans.length) {
+            const t = spans.map(s => s.textContent.trim()).filter(Boolean).join('\n');
             if (t) return t;
         }
-        return '';
-    })()
+        const t = (el.innerText || el.textContent || '').trim();
+        if (t) return t;
+    }
+    return '';
     "#;
 
     match driver.execute(js, vec![]).await {
-        Ok(v) => v.json().as_str().unwrap_or("").trim().to_string(),
-        Err(_) => String::new(),
+        Ok(v) => {
+            let s = v.json().as_str().unwrap_or("").trim().to_string();
+            if s.is_empty() {
+                warn!("collect_body_text: JS 실행됐지만 빈 문자열 반환");
+            }
+            s
+        }
+        Err(e) => { warn!("collect_body_text JS 실패: {e}"); String::new() }
     }
 }
 
 async fn collect_body_images(driver: &WebDriver) -> Vec<BodyImage> {
     let img_elems = driver
         .find_all(By::Css(
-            ".article_viewer .se-module-image img.se-image-resource",
+            ".se-module-image img.se-image-resource",
         ))
         .await
         .unwrap_or_default();
@@ -512,7 +631,7 @@ async fn collect_body_images(driver: &WebDriver) -> Vec<BodyImage> {
 
     let link_elems = driver
         .find_all(By::Css(
-            ".article_viewer .se-module-image a.__se_image_link",
+            ".se-module-image a.__se_image_link",
         ))
         .await
         .unwrap_or_default();
@@ -599,7 +718,7 @@ async fn collect_comments(driver: &WebDriver) -> Vec<Comment> {
     }
 
     let js = r#"
-    Array.from(document.querySelectorAll('ul.comment_list li.CommentItem')).map(item => {
+    return Array.from(document.querySelectorAll('ul.comment_list li.CommentItem')).map(item => {
         const comment_id = item.getAttribute('id') || '';
         const is_reply = (item.getAttribute('class') || '').includes('CommentItem--reply');
         const author = item.querySelector('.comment_nickname')?.textContent?.trim() || null;
@@ -607,12 +726,17 @@ async fn collect_comments(driver: &WebDriver) -> Vec<Comment> {
         const raw = item.querySelector('.comment_text_box .text_comment')?.textContent || '';
         const content = raw.replace(/\s+/g, ' ').trim();
         return { comment_id, is_reply, author, date, content };
-    }).filter(x => x.content)
+    }).filter(x => x.content);
     "#;
 
     let raw: Vec<RawComment> = match driver.execute(js, vec![]).await {
-        Ok(v) => serde_json::from_value(v.json().clone()).unwrap_or_default(),
-        Err(_) => return vec![],
+        Ok(v) => {
+            match serde_json::from_value(v.json().clone()) {
+                Ok(r) => r,
+                Err(e) => { warn!("collect_comments JSON 파싱 실패: {e}"); vec![] }
+            }
+        }
+        Err(e) => { warn!("collect_comments JS 실패: {e}"); return vec![]; }
     };
 
     raw.into_iter().map(|c| Comment {
@@ -635,23 +759,21 @@ async fn find_text(driver: &WebDriver, selectors: &[&str]) -> Option<String> {
     let sels_json = serde_json::to_string(selectors).unwrap_or_else(|_| "[]".to_string());
     let js = format!(
         r#"
-        (() => {{
-            const sels = {sels};
-            for (const sel of sels) {{
-                if (sel.startsWith('meta[')) {{
-                    const v = document.querySelector(sel)?.getAttribute('content')?.trim();
-                    if (v) return v;
-                }} else if (sel === 'title') {{
-                    const t = document.title?.trim();
-                    if (t) return t;
-                }} else {{
-                    const el = document.querySelector(sel);
-                    const t = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
-                    if (t) return t;
-                }}
+        const sels = {sels};
+        for (const sel of sels) {{
+            if (sel.startsWith('meta[')) {{
+                const v = document.querySelector(sel)?.getAttribute('content')?.trim();
+                if (v) return v;
+            }} else if (sel === 'title') {{
+                const t = document.title?.trim();
+                if (t) return t;
+            }} else {{
+                const el = document.querySelector(sel);
+                const t = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+                if (t) return t;
             }}
-            return null;
-        }})()
+        }}
+        return null;
         "#,
         sels = sels_json
     );
@@ -669,7 +791,7 @@ async fn find_text(driver: &WebDriver, selectors: &[&str]) -> Option<String> {
 // Chrome 설정
 // ─────────────────────────────────────────────────────────────────
 
-async fn open_driver(webdriver_url: &str) -> Result<WebDriver, CrawlError> {
+pub async fn open_driver(webdriver_url: &str) -> Result<WebDriver, CrawlError> {
     let caps = chrome_caps()?;
     let driver = WebDriver::new(webdriver_url, caps)
         .await
@@ -687,15 +809,20 @@ async fn open_driver(webdriver_url: &str) -> Result<WebDriver, CrawlError> {
 
 fn chrome_caps() -> Result<ChromeCapabilities, CrawlError> {
     let mut caps = ChromeCapabilities::new();
-    caps.set_headless().map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    // --headless=new: 구형 --headless 대체 (더 real-browser에 가깝게 동작)
+    caps.add_arg("--headless=new").map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     caps.set_no_sandbox().map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     caps.set_disable_gpu().map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     caps.set_disable_dev_shm_usage().map_err(|e| CrawlError::WebDriver(e.to_string()))?;
-    // headless 뷰포트 크기 명시 → IntersectionObserver가 올바르게 동작하도록
     caps.add_arg("--window-size=1920,1080")
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
-    // 자동화 감지 우회
     caps.add_arg("--disable-blink-features=AutomationControlled")
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    caps.add_arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    caps.add_experimental_option("excludeSwitches", vec!["enable-automation"])
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    caps.add_experimental_option("useAutomationExtension", false)
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     Ok(caps)
 }

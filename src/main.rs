@@ -9,6 +9,7 @@ mod plan_b;
 mod plan_c;
 mod plan_d;
 mod plan_e;
+mod plan_f;
 mod test_mode;
 
 use std::path::Path;
@@ -91,9 +92,9 @@ enum Commands {
         webdriver: Option<String>,
     },
 
-    /// 게시판 리스트 페이지에서 게시글을 자동 수집 (제목 클릭 → 본문/날짜/댓글)
-    List {
-        /// 게시판 리스트 페이지 URL (예: 네이버 카페 게시판 URL)
+    /// 가입 네이버 카페 크롤링 — 로그인 쿠키 + ChromeDriver 필요 (Plan B)
+    Cafe {
+        /// 카페 게시판 URL (예: https://cafe.naver.com/cafename/board)
         #[arg(long)]
         url: String,
 
@@ -105,7 +106,7 @@ enum Commands {
         #[arg(long, default_value_t = 3)]
         workers: usize,
 
-        /// WebDriver 엔드포인트 (필수, 예: http://localhost:4444)
+        /// WebDriver 엔드포인트 (예: http://localhost:4444)
         #[arg(long)]
         webdriver: String,
 
@@ -130,6 +131,29 @@ enum Commands {
         max_posts: usize,
 
         /// 병렬 워커 수 (디시는 IP 차단이 심하므로 2~3 권장)
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+
+        /// 결과 저장 디렉토리
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+    },
+
+    /// 미가입 네이버 카페 크롤링 — 네이버 검색 경유, ChromeDriver 필요 (Plan F)
+    CafeSearch {
+        /// 카페 게시판 URL (예: https://cafe.naver.com/cafename/board 또는 ArticleList.nhn?...)
+        #[arg(long)]
+        url: String,
+
+        /// WebDriver 엔드포인트 (예: http://localhost:4444)
+        #[arg(long)]
+        webdriver: String,
+
+        /// 수집할 최대 게시글 수
+        #[arg(long, default_value_t = 50)]
+        max_posts: usize,
+
+        /// 병렬 워커 수 (2~3 권장)
         #[arg(long, default_value_t = 2)]
         workers: usize,
 
@@ -209,7 +233,7 @@ async fn main() -> Result<(), CrawlError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::List { url, max_posts, workers, webdriver, out_dir, cookie_file } => {
+        Commands::Cafe { url, max_posts, workers, webdriver, out_dir, cookie_file } => {
             let url = Url::parse(&url)?;
             let out_dir_path = Path::new(&out_dir);
             ensure_out_dir(out_dir_path)
@@ -328,6 +352,12 @@ async fn main() -> Result<(), CrawlError> {
                 .map_err(|e| CrawlError::Parse(format!("CSV 저장 실패: {e}")))?;
 
             info!(output, "완료");
+        }
+
+        Commands::CafeSearch { url, webdriver, max_posts, workers, out_dir } => {
+            plan_f::run(&webdriver, &url, max_posts, workers, &out_dir)
+                .await
+                .map_err(|e| CrawlError::Parse(format!("cafe-search 오류: {e}")))?;
         }
 
         Commands::Scrape { url, max_posts, workers, out_dir } => {
