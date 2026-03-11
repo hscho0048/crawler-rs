@@ -213,18 +213,22 @@ pub async fn run(
                     })()
                 "#;
 
+                // 클릭 전 DOM 댓글 수 저장
+                let before_dom_count = detail_page
+                    .evaluate("document.querySelectorAll('ul.cmt_list > li.ub-content').length")
+                    .await.ok().and_then(|v| v.into_value::<usize>().ok()).unwrap_or(0);
+
                 if let Ok(val) = detail_page.evaluate(next_page_js).await {
                     if let Ok(has_next) = val.into_value::<bool>() {
                         if has_next {
-                            // 새 댓글이 로드될 때까지 polling (최대 2초)
-                            let before_count = result_comments.len();
-                            let dl = tokio::time::Instant::now() + Duration::from_millis(2000);
+                            // 클릭 전 DOM count 기준으로 변화 감지
+                            let dl = tokio::time::Instant::now() + Duration::from_millis(3000);
                             loop {
                                 tokio::time::sleep(Duration::from_millis(200)).await;
                                 let count = detail_page
                                     .evaluate("document.querySelectorAll('ul.cmt_list > li.ub-content').length")
                                     .await.ok().and_then(|v| v.into_value::<usize>().ok()).unwrap_or(0);
-                                if count != before_count || tokio::time::Instant::now() >= dl { break; }
+                                if count != before_dom_count || tokio::time::Instant::now() >= dl { break; }
                             }
                             continue;
                         }
