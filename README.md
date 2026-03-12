@@ -264,9 +264,8 @@ cargo run --release -- cafe-open \
 
 ## Plan G — Reddit 서브레딧 크롤링
 
-Reddit 공개 JSON API(`reddit.com/r/{subreddit}.json`)를 사용한다.
-Chrome, ChromeDriver, Reddit 계정 모두 불필요.
-게시글 목록을 순차 수집 + 게시글별 댓글을 병렬 수집한다.
+Reddit 공개 JSON API를 사용한다. Chrome, ChromeDriver, 계정 모두 불필요.
+전체 피드 수집(`/r/{subreddit}/{sort}.json`)과 서브레딧 내 키워드 검색(`/r/{subreddit}/search.json`) 두 가지 모드를 지원한다.
 
 ### 출력 파일
 
@@ -275,29 +274,49 @@ Chrome, ChromeDriver, Reddit 계정 모두 불필요.
 | `reddit_posts.csv` | 게시글 (제목, 본문, 작성자, 점수, URL 등) |
 | `reddit_comments.csv` | 댓글 전체 (대댓글 포함, depth 컬럼으로 구분) |
 
+인코딩: **UTF-8 BOM** (Excel 한글 호환)
+
+### 한 줄 실행
+
+```
+cargo run --release -- reddit --subreddit running --search-query "Nike" --sort relevance --out-dir ./out
+```
+
 ### 명령어
 
 ```
-# 기본 수집 (minimalism 서브레딧, 최신순 3페이지)
-cargo run --release -- reddit --subreddit minimalism --sort new --max-pages 3 --workers 3 --out-dir ./out
+# 전체 피드 수집 (최신순 3페이지)
+cargo run --release -- reddit --subreddit minimalism --sort new --max-pages 3 --out-dir ./out
 
-# 키워드 필터 (제목+본문에 단어가 포함된 게시글만 수집)
-cargo run --release -- reddit --subreddit minimalism --keyword "capsule wardrobe" --keyword "closet" --out-dir ./out
+# 서브레딧 내 키워드 검색 (Reddit 검색 API)
+cargo run --release -- reddit --subreddit running --search-query "Nike" --sort relevance --max-pages 5 --out-dir ./out
 
-# 인기순, 댓글 많이
+# 검색 + 클라이언트 필터 조합
+cargo run --release -- reddit --subreddit running --search-query "Nike" --keyword "shoe" --keyword "review" --out-dir ./out
+
+# 인기순, 댓글 대량 수집
 cargo run --release -- reddit --subreddit malefashionadvice --sort hot --max-pages 5 --max-comments 500 --workers 5 --out-dir ./out
 ```
+
+### 검색 모드 비교
+
+| | `--search-query` | `--keyword` |
+|---|---|---|
+| 방식 | Reddit 검색 API 호출 | 수집 후 클라이언트 필터링 |
+| 속도 | 빠름 (서버 필터) | 느림 (전체 수집 후 필터) |
+| `--sort` 옵션 | `relevance` 권장 | `new` / `hot` 등 |
 
 ### 주요 옵션
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
 | `--subreddit` | — | 서브레딧 이름 (필수) |
-| `--sort` | `new` | 정렬 방식 (`new` / `hot` / `top` / `rising`) |
+| `--search-query` | — | 서브레딧 내 검색어 (Reddit 검색 API) |
+| `--sort` | `new` | 정렬 방식 (`new` / `hot` / `top` / `rising` / `relevance`) |
 | `--limit` | 100 | 페이지당 최대 게시글 수 (Reddit 최대 100) |
 | `--max-pages` | 3 | 최대 페이지 수 |
 | `--max-comments` | 200 | 게시글당 최대 댓글 수 |
-| `--keyword` | — | 키워드 필터 (반복 사용 가능, 없으면 전체) |
+| `--keyword` | — | 클라이언트 필터 (반복 사용 가능, 없으면 전체) |
 | `--workers` | 5 | 댓글 병렬 수집 동시성 |
 | `--page-delay-ms` | 2000 | 페이지 요청 사이 딜레이 (ms) |
 | `--user-agent` | `rust:reddit-crawler:v1.0 (by /u/anonymous)` | HTTP User-Agent |

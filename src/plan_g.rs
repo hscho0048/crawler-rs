@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use csv::Writer;
+use urlencoding;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
 use tokio::sync::Semaphore;
@@ -18,11 +19,12 @@ use tracing::{info, warn};
 
 pub struct RedditConfig {
     pub subreddit:    String,
-    pub sort:         String,   // "new" | "hot" | "top" | "rising"
+    pub sort:         String,   // "new" | "hot" | "top" | "rising" | "relevance"
     pub limit:        usize,    // 페이지당 최대 게시글 수 (Reddit 최대 100)
     pub max_pages:    usize,
     pub max_comments: usize,    // 게시글당 최대 댓글 수
-    pub keywords:     Vec<String>, // 빈 벡터 = 전체 수집
+    pub keywords:     Vec<String>, // 빈 벡터 = 전체 수집 (제목+본문 필터)
+    pub search_query: Option<String>, // 서브레딧 내 검색어 (Reddit 검색 API 사용)
     pub workers:      usize,    // 댓글 병렬 수집 동시성
     pub user_agent:   String,   // Reddit 요구 형식: "platform:appid:v1.0 (by /u/username)"
     pub page_delay_ms: u64,     // 페이지 사이 딜레이 (ms)
@@ -87,7 +89,7 @@ pub async fn run(cfg: RedditConfig) -> Result<(), Box<dyn std::error::Error + Se
     for page_num in 0..cfg.max_pages {
         info!("[r/{}] 페이지 {} 요청 중...", cfg.subreddit, page_num + 1);
 
-        let listing = match fetch_listing(&client, &cfg.subreddit, &cfg.sort, cfg.limit, after.as_deref()).await {
+        let listing = match fetch_listing(&client, &cfg.subreddit, &cfg.sort, cfg.limit, after.as_deref(), cfg.search_query.as_deref()).await {
             Some(v) => v,
             None    => { warn!("[중단] 응답 없음"); break; }
         };
@@ -213,15 +215,24 @@ async fn fetch_json(client: &reqwest::Client, url: &str) -> Option<Value> {
 }
 
 async fn fetch_listing(
-    client:    &reqwest::Client,
-    subreddit: &str,
-    sort:      &str,
-    limit:     usize,
-    after:     Option<&str>,
+    client:       &reqwest::Client,
+    subreddit:    &str,
+    sort:         &str,
+    limit:        usize,
+    after:        Option<&str>,
+    search_query: Option<&str>,
 ) -> Option<Value> {
-    let mut url = format!(
-        "https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}&raw_json=1"
-    );
+    let mut url = if let Some(q) = search_query {
+        // 서브레딧 내 검색 API
+        format!(
+            "https://www.reddit.com/r/{subreddit}/search.json?q={q}&restrict_sr=1&sort={sort}&limit={limit}&raw_json=1",
+            q = urlencoding::encode(q)
+        )
+    } else {
+        format!(
+            "https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}&raw_json=1"
+        )
+    };
     if let Some(a) = after {
         url.push_str("&after=");
         url.push_str(a);

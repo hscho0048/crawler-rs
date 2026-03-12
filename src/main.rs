@@ -288,7 +288,11 @@ enum Commands {
         #[arg(long, default_value_t = 200)]
         max_comments: usize,
 
-        /// 키워드 필터 (반복 사용 가능, 없으면 전체 수집)
+        /// 서브레딧 내 검색어 (Reddit 검색 API 사용, 없으면 전체 수집)
+        #[arg(long)]
+        search_query: Option<String>,
+
+        /// 키워드 필터 (수집 후 제목+본문 필터링, 반복 사용 가능)
         #[arg(long)]
         keyword: Vec<String>,
 
@@ -520,7 +524,7 @@ async fn main() -> Result<(), CrawlError> {
                 .map_err(|e| CrawlError::Parse(format!("cafe-open 오류: {e}")))?;
         }
 
-        Commands::Reddit { subreddit, sort, limit, max_pages, max_comments, keyword, workers, user_agent, page_delay_ms, out_dir } => {
+        Commands::Reddit { subreddit, sort, limit, max_pages, max_comments, search_query, keyword, workers, user_agent, page_delay_ms, out_dir } => {
             plan_g::run(plan_g::RedditConfig {
                 subreddit,
                 sort,
@@ -528,6 +532,7 @@ async fn main() -> Result<(), CrawlError> {
                 max_pages,
                 max_comments,
                 keywords: keyword,
+                search_query,
                 workers,
                 user_agent,
                 page_delay_ms,
