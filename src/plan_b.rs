@@ -163,7 +163,7 @@ struct ArticleApiResult {
 #[serde(rename_all = "camelCase")]
 struct ArticleApiArticle {
     subject: Option<String>,
-    content: Option<String>,
+    content_html: Option<String>,
     writer: Option<ArticleApiWriter>,
     write_date: Option<i64>,
     read_count: Option<u64>,
@@ -766,58 +766,65 @@ pub async fn scrape_with_driver(
 ) -> Result<PostData, CrawlError> {
     // ── 1) SSR HTML 파싱 (Next.js __NEXT_DATA__ 포함) ───────────────
     if let Some(ssr) = fetch_article_ssr(client, &article.url).await {
-        let title = ssr.title
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| article.title.clone());
-        let body  = ssr.body.unwrap_or_default();
-
-        // SSR에 댓글 없을 경우 JSON API로 보완 시도
-        let comments = if let Some((cafe_id, article_id)) = extract_cafe_article_ids(&article.url) {
-            let c = fetch_comments_api(client, &cafe_id, &article_id).await;
-            if !c.is_empty() { c } else { vec![] }
-        } else { vec![] };
-
-        return Ok(PostData {
-            source: Source::NaverCafe,
-            url: article.url,
-            title,
-            author: ssr.author.unwrap_or_default(),
-            author_level: String::new(),
-            written_at: ssr.written_at.unwrap_or_else(|| article.date.clone()),
-            views: ssr.views.unwrap_or_default(),
-            body,
-            body_images: vec![],
-            comments,
-        });
-    }
-
-    // ── 2) gw/v4 JSON API ────────────────────────────────────────
-    if let Some((cafe_id, article_id)) = extract_cafe_article_ids(&article.url) {
-        if let Some(api_art) = fetch_article_api(client, &cafe_id, &article_id).await {
-            let title = api_art.subject
+        let body = ssr.body.unwrap_or_default();
+        // 본문이 실제로 있을 때만 early return — 없으면 API/DOM 폴백으로 진행
+        if !body.is_empty() {
+            let title = ssr.title
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| article.title.clone());
-            let body = api_art.content.as_deref().map(html_to_text).unwrap_or_default();
-            let written_at = api_art.write_date
-                .map(ms_to_kst_str)
-                .unwrap_or_else(|| article.date.clone());
-            let comments = fetch_comments_api(client, &cafe_id, &article_id).await;
 
-            info!("JSON API 성공: {} (댓글 {}개)", title, comments.len());
+            let comments = if let Some((cafe_id, article_id)) = extract_cafe_article_ids(&article.url) {
+                let c = fetch_comments_api(client, &cafe_id, &article_id).await;
+                if !c.is_empty() { c } else { vec![] }
+            } else { vec![] };
+
             return Ok(PostData {
                 source: Source::NaverCafe,
                 url: article.url,
                 title,
-                author: api_art.writer.and_then(|w| w.nick).unwrap_or_default(),
+                author: ssr.author.unwrap_or_default(),
                 author_level: String::new(),
-                written_at,
-                views: api_art.read_count.map(|n| n.to_string()).unwrap_or_default(),
+                written_at: ssr.written_at.unwrap_or_else(|| article.date.clone()),
+                views: ssr.views.unwrap_or_default(),
                 body,
                 body_images: vec![],
                 comments,
             });
         }
-        warn!("JSON API도 실패 → WebDriver DOM 폴백: {}", article.url);
+        warn!("SSR 파싱 성공했지만 본문 없음 → API/DOM 폴백: {}", article.url);
+    }
+
+    // ── 2) gw/v4 JSON API ────────────────────────────────────────
+    if let Some((cafe_id, article_id)) = extract_cafe_article_ids(&article.url) {
+        if let Some(api_art) = fetch_article_api(client, &cafe_id, &article_id).await {
+            let body = api_art.content_html.as_deref().map(html_to_text).unwrap_or_default();
+            if !body.is_empty() {
+                let title = api_art.subject
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| article.title.clone());
+                let written_at = api_art.write_date
+                    .map(ms_to_kst_str)
+                    .unwrap_or_else(|| article.date.clone());
+                let comments = fetch_comments_api(client, &cafe_id, &article_id).await;
+
+                info!("JSON API 성공: {} (댓글 {}개)", title, comments.len());
+                return Ok(PostData {
+                    source: Source::NaverCafe,
+                    url: article.url,
+                    title,
+                    author: api_art.writer.and_then(|w| w.nick).unwrap_or_default(),
+                    author_level: String::new(),
+                    written_at,
+                    views: api_art.read_count.map(|n| n.to_string()).unwrap_or_default(),
+                    body,
+                    body_images: vec![],
+                    comments,
+                });
+            }
+            warn!("JSON API 본문 없음 → WebDriver DOM 폴백: {}", article.url);
+        } else {
+            warn!("JSON API 실패 → WebDriver DOM 폴백: {}", article.url);
+        }
     }
 
     // ── WebDriver DOM 폴백 ────────────────────────────────────────
