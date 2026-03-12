@@ -42,3 +42,7 @@ regex = "1"
 
 # Plan G (Reddit)
 chrono = "0.4"
+
+# Plan H (Naver Blog Search)
+urlencoding = "2"
+rand = "0.8"

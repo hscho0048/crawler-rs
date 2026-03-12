@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -361,7 +363,11 @@ fn utc_to_str(ts: Option<f64>) -> String {
 // ─────────────────────────────────────────────────────────────────
 
 fn write_posts_csv(rows: &[PostRow], path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut wtr = Writer::from_path(path)?;
+    let file = File::create(path)?;
+    let mut buf = BufWriter::new(file);
+    use std::io::Write as _;
+    buf.write_all(b"\xef\xbb\xbf")?;
+    let mut wtr = Writer::from_writer(buf);
     wtr.write_record([
         "subreddit","post_id","post_title","post_text","post_author",
         "post_score","post_upvote_ratio","post_num_comments",
@@ -384,7 +390,11 @@ fn write_posts_csv(rows: &[PostRow], path: &Path) -> Result<(), Box<dyn std::err
 }
 
 fn write_comments_csv(rows: &[CommentRow], path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut wtr = Writer::from_path(path)?;
+    let file = File::create(path)?;
+    let mut buf = BufWriter::new(file);
+    use std::io::Write as _;
+    buf.write_all(b"\xef\xbb\xbf")?;
+    let mut wtr = Writer::from_writer(buf);
     wtr.write_record([
         "subreddit","post_id","post_title","post_created_datetime_utc","post_url",
         "comment_id","comment_parent_id","comment_author","comment_body",

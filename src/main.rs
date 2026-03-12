@@ -10,6 +10,7 @@ mod plan_c;
 mod plan_d;
 mod plan_e;
 mod plan_g;
+mod plan_h;
 mod test_mode;
 mod plan_f;
 
@@ -165,6 +166,49 @@ enum Commands {
         /// 헤드리스 모드 (화면 없이 실행)
         #[arg(long, default_value_t = false)]
         headless: bool,
+    },
+
+    /// 네이버 블로그 검색 크롤링 — 검색어+기간으로 수집 (Plan H)
+    BlogSearch {
+        /// 검색 키워드
+        #[arg(long)]
+        query: String,
+
+        /// 검색 시작일 (YYYY-MM-DD)
+        #[arg(long)]
+        start_date: String,
+
+        /// 검색 종료일 (YYYY-MM-DD)
+        #[arg(long)]
+        end_date: String,
+
+        /// 수집할 최대 게시글 수
+        #[arg(long, default_value_t = 30)]
+        max_posts: usize,
+
+        /// 병렬 워커 수 (Chrome 세션 수)
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// WebDriver 엔드포인트
+        #[arg(long, default_value = "http://localhost:9515")]
+        webdriver: String,
+
+        /// 헤드리스 모드 (기본 활성화, 비활성화하려면 --headless false)
+        #[arg(long, default_value_t = true)]
+        headless: bool,
+
+        /// 결과 저장 디렉토리
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+
+        /// 검색 결과 스크롤 횟수
+        #[arg(long, default_value_t = 30)]
+        search_max_scrolls: usize,
+
+        /// 게시글 상세 스크롤 횟수
+        #[arg(long, default_value_t = 12)]
+        detail_max_scrolls: usize,
     },
 
     /// 미가입 네이버 카페 크롤링 — 네이버 검색 경유 (Plan F)
@@ -396,6 +440,28 @@ async fn main() -> Result<(), CrawlError> {
                 .map_err(|e| CrawlError::Parse(format!("CSV 저장 실패: {e}")))?;
 
             info!(output, "완료");
+        }
+
+        Commands::BlogSearch {
+            query, start_date, end_date, max_posts, workers,
+            webdriver, headless, out_dir,
+            search_max_scrolls, detail_max_scrolls,
+        } => {
+            plan_h::run(plan_h::PlanHConfig {
+                query,
+                start_date,
+                end_date,
+                max_posts,
+                workers,
+                webdriver_url: webdriver,
+                headless,
+                output_dir: std::path::PathBuf::from(out_dir),
+                search_max_scrolls,
+                detail_max_scrolls,
+                ..plan_h::PlanHConfig::default()
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("blog-search 오류: {e}")))?;
         }
 
         Commands::CafeOpen { url, max_posts, workers, webdriver, out_dir } => {

@@ -11,7 +11,9 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 | **C** | CDP (chromiumoxide) 무한 스크롤 | 오늘의집 등 스크롤 피드형 | X |
 | **D** | CDP (chromiumoxide) 페이지네이션 | DC인사이드 등 게시판형 | X |
 | **E** | WebDriver 병렬 Worker Pool | 스마트스토어 상품 리뷰 | O |
+| **F** | WebDriver + 네이버 검색 경유 | 네이버 카페 (미가입) | O |
 | **G** | reqwest 공개 JSON API | Reddit 서브레딧 | X |
+| **H** | WebDriver 병렬 Worker Pool | 네이버 블로그 검색 (키워드+기간) | O |
 
 > Plan C / D는 ChromeDriver 없이 Chrome에 직접 CDP로 연결한다. Chrome 설치만 필요.
 > Plan G는 Reddit 공개 JSON API를 사용하므로 Chrome, ChromeDriver, 계정 모두 불필요.
@@ -22,7 +24,7 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 
 - Rust stable (2021 edition)
 - Chrome 브라우저 (Plan C / D)
-- ChromeDriver (Plan B / E, Chrome 버전과 일치해야 함)
+- ChromeDriver (Plan B / E / F / H, Chrome 버전과 일치해야 함)
 
 ```
 cargo build --release
@@ -209,6 +211,56 @@ https://smartstore.naver.com/store2/products/222
 
 ---
 
+## Plan F — 미가입 네이버 카페 크롤링
+
+가입하지 않아도 열람 가능한 카페 게시글을 수집한다.
+네이버 검색을 경유해 공개 접근 URL을 얻고, Plan B의 스크래퍼로 본문·댓글을 추출한다.
+
+### 동작 흐름
+
+1. Plan B의 목록 수집 로직으로 게시글 URL·제목 수집
+2. 각 게시글 제목으로 네이버 카페 탭 검색 → 검색 결과 URL로 교체
+3. 교체된 URL로 Plan B 스크래퍼 호출 → 본문·댓글 추출
+
+> 검색 결과가 없거나 매칭 실패 시 해당 게시글은 건너뛴다.
+
+### 사전 준비
+
+```
+chromedriver.exe --port=4444
+```
+
+### 명령어
+
+```
+cargo run --release -- cafe-open \
+  --url "https://cafe.naver.com/cafename/board" \
+  --max-posts 50 \
+  --workers 3 \
+  --webdriver http://localhost:4444 \
+  --out-dir ./out
+```
+
+### 주요 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--url` | — | 카페 게시판 URL (필수) |
+| `--max-posts` | 20 | 수집할 최대 게시글 수 |
+| `--workers` | 3 | 병렬 Chrome 세션 수 |
+| `--webdriver` | — | ChromeDriver 엔드포인트 (필수) |
+| `--out-dir` | `out` | 결과 저장 디렉토리 |
+
+### Plan B와의 차이
+
+| | Plan B | Plan F |
+|---|---|---|
+| 로그인 쿠키 | 필요 | 불필요 |
+| 접근 방식 | 직접 URL | 네이버 검색 경유 |
+| 수집 범위 | 회원 전용 포함 | 공개 게시글만 |
+
+---
+
 ## Plan G — Reddit 서브레딧 크롤링
 
 Reddit 공개 JSON API(`reddit.com/r/{subreddit}.json`)를 사용한다.
@@ -257,6 +309,80 @@ Reddit 공개 API는 요청이 많으면 `429 Too Many Requests`를 반환한다
 - `Retry-After` 헤더가 있으면 그 시간(초)만큼 자동 대기 후 재시도 (없으면 120초)
 - `--page-delay-ms 3000` 이상으로 설정하면 429 빈도가 줄어든다
 - `--workers`를 낮추면 댓글 수집 동시 요청 수가 줄어든다
+
+---
+
+## Plan H — 네이버 블로그 검색 크롤링
+
+키워드와 기간을 지정해 네이버 블로그 검색 결과를 수집한다.
+1단계에서 검색 결과 전체를 스크롤해 URL 목록을 모은 뒤, 2단계에서 `workers`개의 Chrome 세션이 본문·댓글을 병렬 수집한다.
+
+### 사전 준비
+
+```
+chromedriver.exe --port=9515
+```
+
+> ChromeDriver 포트 기본값이 **9515**임에 주의 (다른 플랜은 4444).
+
+### 한 줄 실행
+
+```
+cargo run --release -- blog-search --query "제주도 맛집" --start-date 2025-01-01 --end-date 2025-03-01 --webdriver http://localhost:9515 --out-dir ./out
+```
+
+### 명령어
+
+```
+# 기본 (헤드리스, 워커 3개, 최대 30개)
+cargo run --release -- blog-search --query "제주도 맛집" --start-date 2025-01-01 --end-date 2025-03-01 --webdriver http://localhost:9515 --out-dir ./out
+
+# 대량 수집 (워커 5개, 최대 200개)
+cargo run --release -- blog-search --query "다이어트 식단" --start-date 2024-06-01 --end-date 2024-12-31 --max-posts 200 --workers 5 --webdriver http://localhost:9515 --out-dir ./out
+
+# 브라우저 창 보이게 (디버그용)
+cargo run --release -- blog-search --query "러닝화 추천" --start-date 2025-01-01 --end-date 2025-03-01 --webdriver http://localhost:9515 --headless false --out-dir ./out
+```
+
+### 주요 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--query` | — | 검색 키워드 (필수) |
+| `--start-date` | — | 검색 시작일 `YYYY-MM-DD` (필수) |
+| `--end-date` | — | 검색 종료일 `YYYY-MM-DD` (필수) |
+| `--max-posts` | 30 | 수집할 최대 게시글 수 |
+| `--workers` | 3 | 병렬 Chrome 세션 수 |
+| `--webdriver` | `http://localhost:9515` | ChromeDriver 엔드포인트 |
+| `--headless` | true | 헤드리스 모드 (false 시 브라우저 창 표시) |
+| `--out-dir` | `out` | 결과 저장 디렉토리 |
+| `--search-max-scrolls` | 30 | 검색 결과 최대 스크롤 횟수 |
+| `--detail-max-scrolls` | 8 | 게시글 페이지 최대 스크롤 횟수 |
+
+### 출력 파일
+
+`{키워드}_{시작일}_{종료일}_posts.csv` / `_comments.csv` 형태로 저장된다.
+
+**posts CSV**
+
+| 제목 | url | 날짜 | 본문 | 댓글 |
+|------|-----|------|------|------|
+| 게시글 제목 | 블로그 포스트 URL | 검색 결과 표시 날짜 | 본문 전체 텍스트 | 댓글 JSON 배열 |
+
+**comments CSV**
+
+| 컬럼 | 설명 |
+|------|------|
+| `post_url` | 게시글 URL |
+| `comment_id` | 댓글 ID |
+| `parent_comment_id` | 부모 댓글 ID (대댓글인 경우) |
+| `reply_level` | 댓글 깊이 (1: 원댓글, 2: 대댓글) |
+| `author_name` | 작성자 닉네임 |
+| `content` | 댓글 내용 |
+| `created_at` | 작성 일시 |
+| `like_count` | 좋아요 수 |
+
+인코딩: **UTF-8 BOM** (Excel 한글 호환)
 
 ---
 
