@@ -14,6 +14,7 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 | **F** | WebDriver + 네이버 검색 경유 | 네이버 카페 (미가입) | O |
 | **G** | reqwest 공개 JSON API | Reddit 서브레딧 | X |
 | **H** | WebDriver 병렬 Worker Pool | 네이버 블로그 검색 (키워드+기간) | O |
+| **I** | WebDriver 병렬 Worker Pool | Threads.com 키워드 검색 (로그인 필요) | O |
 
 > Plan C / D는 ChromeDriver 없이 Chrome에 직접 CDP로 연결한다. Chrome 설치만 필요.
 > Plan G는 Reddit 공개 JSON API를 사용하므로 Chrome, ChromeDriver, 계정 모두 불필요.
@@ -24,7 +25,7 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 
 - Rust stable (2021 edition)
 - Chrome 브라우저 (Plan C / D)
-- ChromeDriver (Plan B / E / F / H, Chrome 버전과 일치해야 함)
+- ChromeDriver (Plan B / E / F / H / I, Chrome 버전과 일치해야 함)
 
 ```
 cargo build --release
@@ -383,6 +384,78 @@ cargo run --release -- blog-search --query "러닝화 추천" --start-date 2025-
 | `like_count` | 좋아요 수 |
 
 인코딩: **UTF-8 BOM** (Excel 한글 호환)
+
+---
+
+## Plan I — Threads.com 키워드 크롤링
+
+키워드로 Threads 검색 결과를 수집한다. 로그인이 필요하므로 1단계에서 브라우저 창을 열어 수동 로그인 후 Enter를 누르면, 2단계에서 `workers`개의 헤드리스 Chrome이 게시글·댓글을 병렬 수집한다.
+
+### 동작 흐름
+
+1. 브라우저 창 열림 → `https://www.threads.com` 이동
+2. **수동 로그인 후 Enter 입력**
+3. 검색 URL로 이동 → 무한 스크롤로 게시글 URL 수집
+4. 쿠키 추출 → 1단계 드라이버 종료
+5. N개 헤드리스 드라이버가 쿠키 주입 후 게시글 상세·댓글 병렬 수집
+6. CSV + XLSX 저장
+
+### 사전 준비
+
+```
+chromedriver.exe --port=9515
+```
+
+### 한 줄 실행
+
+```
+cargo run --release -- threads --keyword "러닝화" --webdriver http://localhost:9515 --out-dir ./out
+```
+
+### 명령어
+
+```
+# 기본 (워커 3개, 최대 30개)
+cargo run --release -- threads --keyword "러닝화" --webdriver http://localhost:9515 --out-dir ./out
+
+# 대량 수집 (워커 5개, 최대 100개)
+cargo run --release -- threads --keyword "다이어트" --max-posts 100 --workers 5 --webdriver http://localhost:9515 --out-dir ./out
+
+# 댓글 스크롤 조정 (댓글 많은 게시글)
+cargo run --release -- threads --keyword "맛집" --comment-scroll-rounds 20 --comment-pause-secs 2 --webdriver http://localhost:9515 --out-dir ./out
+```
+
+### 주요 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--keyword` | — | 검색 키워드 (필수) |
+| `--max-posts` | 30 | 수집할 최대 게시글 수 |
+| `--workers` | 3 | 병렬 Chrome 세션 수 |
+| `--webdriver` | `http://localhost:9515` | ChromeDriver 엔드포인트 |
+| `--out-dir` | `out` | 결과 저장 디렉토리 |
+| `--comment-scroll-rounds` | 10 | 댓글 페이지 스크롤 최대 횟수 |
+| `--comment-pause-secs` | 1 | 댓글 스크롤 간격 (초) |
+
+### 출력 파일
+
+`threads_{키워드}.csv` / `.xlsx` 형태로 저장된다. 댓글이 있는 게시글은 댓글 수만큼 행이 반복된다.
+
+| 컬럼 | 설명 |
+|------|------|
+| `keyword` | 검색 키워드 |
+| `url` | 게시글 URL |
+| `author` | 작성자 |
+| `date` | 작성 일시 |
+| `post_text` | 게시글 본문 |
+| `likes` | 좋아요 수 |
+| `replies` | 댓글 수 |
+| `reposts` | 리포스트 수 |
+| `comment_text` | 댓글 내용 (댓글 없으면 빈값) |
+
+CSV 인코딩: **UTF-8 BOM** (Excel 한글 호환)
+
+> Threads는 로그인 없이는 검색 결과 접근이 제한된다. 1단계 로그인 창에서 반드시 로그인 후 Enter를 눌러야 한다.
 
 ---
 

@@ -46,3 +46,6 @@ chrono = "0.4"
 # Plan H (Naver Blog Search)
 urlencoding = "2"
 rand = "0.8"
+
+# Plan I (Threads)
+rust_xlsxwriter = "0.75"

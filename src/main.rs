@@ -11,6 +11,7 @@ mod plan_d;
 mod plan_e;
 mod plan_g;
 mod plan_h;
+mod plan_i;
 mod test_mode;
 mod plan_f;
 
@@ -166,6 +167,37 @@ enum Commands {
         /// 헤드리스 모드 (화면 없이 실행)
         #[arg(long, default_value_t = false)]
         headless: bool,
+    },
+
+    /// Threads.com 키워드 크롤링 — 로그인 후 검색·댓글 병렬 수집 (Plan I)
+    Threads {
+        /// 검색 키워드
+        #[arg(long)]
+        keyword: String,
+
+        /// 수집할 최대 게시글 수
+        #[arg(long, default_value_t = 30)]
+        max_posts: usize,
+
+        /// 병렬 워커 수 (Chrome 세션 수)
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// WebDriver 엔드포인트
+        #[arg(long, default_value = "http://localhost:9515")]
+        webdriver: String,
+
+        /// 결과 저장 디렉토리
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+
+        /// 댓글 스크롤 최대 횟수
+        #[arg(long, default_value_t = 10)]
+        comment_scroll_rounds: usize,
+
+        /// 댓글 스크롤 간격 (초)
+        #[arg(long, default_value_t = 1)]
+        comment_pause_secs: u64,
     },
 
     /// 네이버 블로그 검색 크롤링 — 검색어+기간으로 수집 (Plan H)
@@ -440,6 +472,24 @@ async fn main() -> Result<(), CrawlError> {
                 .map_err(|e| CrawlError::Parse(format!("CSV 저장 실패: {e}")))?;
 
             info!(output, "완료");
+        }
+
+        Commands::Threads {
+            keyword, max_posts, workers, webdriver, out_dir,
+            comment_scroll_rounds, comment_pause_secs,
+        } => {
+            plan_i::run(plan_i::PlanIConfig {
+                keyword,
+                max_posts,
+                workers,
+                webdriver_url: webdriver,
+                out_dir,
+                comment_scroll_rounds,
+                comment_pause_secs,
+                ..plan_i::PlanIConfig::default()
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("threads 오류: {e}")))?;
         }
 
         Commands::BlogSearch {
