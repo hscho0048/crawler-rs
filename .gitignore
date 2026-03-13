@@ -21,3 +21,5 @@ chromedriver
 
 # 배포 패키지
 *.zip
+
+asin.txt
