@@ -15,6 +15,7 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 | **G** | reqwest 공개 JSON API | Reddit 서브레딧 | X |
 | **H** | WebDriver 병렬 Worker Pool | 네이버 블로그 검색 (키워드+기간) | O |
 | **I** | WebDriver 병렬 Worker Pool | Threads.com 키워드 검색 (로그인 필요) | O |
+| **J** | WebDriver 병렬 Worker Pool | Amazon 상품 리뷰 (로그인 필요, 쿠키 재사용) | O |
 
 > Plan C / D는 ChromeDriver 없이 Chrome에 직접 CDP로 연결한다. Chrome 설치만 필요.
 > Plan G는 Reddit 공개 JSON API를 사용하므로 Chrome, ChromeDriver, 계정 모두 불필요.
@@ -475,6 +476,93 @@ cargo run --release -- threads --keyword "맛집" --comment-scroll-rounds 20 --c
 CSV 인코딩: **UTF-8 BOM** (Excel 한글 호환)
 
 > Threads는 로그인 없이는 검색 결과 접근이 제한된다. 1단계 로그인 창에서 반드시 로그인 후 Enter를 눌러야 한다.
+
+---
+
+## Plan J — Amazon 상품 리뷰 수집 (병렬 Worker Pool)
+
+여러 Amazon 상품의 리뷰를 `workers`개의 Chrome 세션이 동시에 수집한다.
+각 워커는 상품 하나를 담당해 Next 버튼으로 페이지를 순차 이동하며 목표 리뷰 수까지 수집한다.
+첫 실행 시 수동 로그인 후 쿠키를 자동 저장하고, 이후에는 쿠키 파일로 완전 헤드리스 실행이 가능하다.
+
+### 사전 준비
+
+```
+chromedriver.exe --port=4444
+```
+
+### 동작 흐름
+
+1. `--cookie-file` 없는 경우: 브라우저 창이 열림 → Amazon 로그인 후 Enter → 쿠키 `amazon_output/cookies.json`에 자동 저장
+2. 상품 URL 큐에서 워커가 하나씩 가져가 Next 버튼 클릭으로 페이지 순차 수집
+3. 목표 리뷰 수 도달 또는 마지막 페이지에서 종료
+
+### 한 줄 실행 (첫 실행, 로그인 필요)
+
+```
+cargo run --release -- amazon --url "https://www.amazon.com/product-reviews/ASIN" --max-reviews 100 --workers 3 --webdriver http://localhost:4444
+```
+
+### 이후 실행 (완전 헤드리스)
+
+```
+cargo run --release -- amazon \
+  --url "https://www.amazon.com/product-reviews/ASIN1" \
+  --url "https://www.amazon.com/product-reviews/ASIN2" \
+  --url "https://www.amazon.com/product-reviews/ASIN3" \
+  --max-reviews 200 \
+  --workers 3 \
+  --headless \
+  --cookie-file amazon_output/cookies.json \
+  --webdriver http://localhost:4444
+```
+
+### URL 파일로 입력
+
+```
+cargo run --release -- amazon --input ./asins.txt --max-reviews 200 --workers 3 --headless --cookie-file amazon_output/cookies.json --webdriver http://localhost:4444
+```
+
+```
+# asins.txt
+https://www.amazon.com/product-reviews/B00KK0PICK
+https://www.amazon.com/product-reviews/B01A4B2JHG
+```
+
+### 주요 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--url` | — | 상품 리뷰 URL (반복 사용 가능) |
+| `--input` | — | URL 목록 파일 (한 줄에 하나) |
+| `--max-reviews` | 100 | 상품당 수집할 최대 리뷰 수 |
+| `--workers` | 3 | 병렬 Chrome 세션 수 (동시 수집 상품 수) |
+| `--webdriver` | `http://localhost:9515` | ChromeDriver 엔드포인트 |
+| `--headless` | false | 헤드리스 모드 (`--cookie-file`과 함께 사용) |
+| `--cookie-file` | — | 쿠키 파일 경로 (첫 실행 후 자동 생성) |
+| `--no-read-more` | false | Read More 클릭 비활성화 |
+| `--out-dir` | `amazon_output` | 결과 저장 디렉토리 |
+
+### 출력 파일
+
+`amazon_output/amazon_reviews.csv` (UTF-8 BOM)
+
+| 컬럼 | 설명 |
+|------|------|
+| `product_url` | 수집한 페이지 URL |
+| `page_number` | 페이지 번호 |
+| `product_title` | 상품명 |
+| `total_rating` | 전체 평점 |
+| `total_review_count` | 전체 리뷰 수 |
+| `review_id` | 리뷰 고유 ID |
+| `author` | 작성자 |
+| `review_title` | 리뷰 제목 |
+| `rating` | 별점 |
+| `review_country` | 작성 국가 |
+| `review_date` | 작성일 |
+| `verified_purchase` | 구매 인증 여부 |
+| `helpful_votes` | 도움됨 투표 수 |
+| `review_text` | 리뷰 본문 |
 
 ---
 

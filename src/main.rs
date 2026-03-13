@@ -12,6 +12,7 @@ mod plan_e;
 mod plan_g;
 mod plan_h;
 mod plan_i;
+mod plan_j;
 mod test_mode;
 mod plan_f;
 
@@ -313,6 +314,45 @@ enum Commands {
         out_dir: String,
     },
 
+    /// Amazon 상품 리뷰 병렬 수집 (ChromeDriver 필요, Plan J)
+    Amazon {
+        /// 상품 리뷰 URL (반복 사용 가능, 예: --url "https://amazon.com/..." --url "https://amazon.com/...")
+        #[arg(long)]
+        url: Vec<String>,
+
+        /// 상품 URL 목록 파일 (한 줄에 URL 하나)
+        #[arg(long)]
+        input: Option<String>,
+
+        /// 상품당 수집할 최대 리뷰 수
+        #[arg(long, default_value_t = 100)]
+        max_reviews: usize,
+
+        /// 병렬 워커(Chrome 세션) 수
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// ChromeDriver 엔드포인트
+        #[arg(long, default_value = "http://localhost:9515")]
+        webdriver: String,
+
+        /// 헤드리스 모드 (--cookie-file과 함께 사용 시 완전 헤드리스)
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+
+        /// 쿠키 파일 경로 (첫 실행 후 amazon_output/cookies.json에 자동 저장됨)
+        #[arg(long)]
+        cookie_file: Option<String>,
+
+        /// Read More 자동 클릭 비활성화
+        #[arg(long, default_value_t = false)]
+        no_read_more: bool,
+
+        /// 결과 저장 디렉토리
+        #[arg(long, default_value = "amazon_output")]
+        out_dir: String,
+    },
+
     /// Crawl URLs (file and/or repeated --url)
     Crawl {
         /// Input file path (one URL per line)
@@ -540,6 +580,38 @@ async fn main() -> Result<(), CrawlError> {
             })
             .await
             .map_err(|e| CrawlError::Parse(format!("reddit 오류: {e}")))?;
+        }
+
+        Commands::Amazon { url, input, max_reviews, workers, webdriver, headless, cookie_file, no_read_more, out_dir } => {
+            let mut urls: Vec<String> = url;
+            if let Some(path) = input {
+                let lines = std::fs::read_to_string(&path)
+                    .map_err(|e| CrawlError::Parse(format!("파일 읽기 실패 {path}: {e}")))?;
+                for line in lines.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && !line.starts_with('#') {
+                        urls.push(line.to_string());
+                    }
+                }
+            }
+            if urls.is_empty() {
+                return Err(CrawlError::Parse(
+                    "URL이 없습니다. --url 또는 --input을 지정하세요.".to_string(),
+                ));
+            }
+            info!(total = urls.len(), "Amazon 수집 대상 상품 수");
+            plan_j::run(plan_j::PlanJConfig {
+                review_urls: urls,
+                max_reviews,
+                workers,
+                webdriver_url: webdriver,
+                headless,
+                cookie_file,
+                click_read_more: !no_read_more,
+                out_dir,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("amazon 오류: {e}")))?;
         }
 
         Commands::Scrape { url, max_posts, workers, out_dir } => {

@@ -6,6 +6,7 @@
 
 # 크롤링 결과
 /out/
+/amazon_output/
 
 # 로그
 *.log
