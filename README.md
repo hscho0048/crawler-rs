@@ -16,6 +16,7 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 | **H** | WebDriver 병렬 Worker Pool | 네이버 블로그 검색 (키워드+기간) | O |
 | **I** | WebDriver 병렬 Worker Pool | Threads.com 키워드 검색 (로그인 필요) | O |
 | **J** | WebDriver 병렬 Worker Pool | Amazon 상품 리뷰 (로그인 필요, 쿠키 재사용) | O |
+| **K** | WebDriver 병렬 Worker Pool | Goodreads 도서 리뷰 (로그인 필요, 쿠키 재사용) | O |
 
 > Plan C / D는 ChromeDriver 없이 Chrome에 직접 CDP로 연결한다. Chrome 설치만 필요.
 > Plan G는 Reddit 공개 JSON API를 사용하므로 Chrome, ChromeDriver, 계정 모두 불필요.
@@ -562,6 +563,73 @@ https://www.amazon.com/product-reviews/B01A4B2JHG
 | `review_date` | 작성일 |
 | `verified_purchase` | 구매 인증 여부 |
 | `helpful_votes` | 도움됨 투표 수 |
+| `review_text` | 리뷰 본문 |
+
+---
+
+## Plan K — Goodreads 도서 리뷰 수집 (병렬 Worker Pool)
+
+여러 Goodreads 도서의 리뷰를 `workers`개의 Chrome 세션이 동시에 수집한다.
+각 워커는 도서 하나를 담당해 무한 스크롤 + "Show more reviews" 버튼으로 목표 리뷰 수까지 수집한다.
+첫 실행 시 수동 로그인 후 쿠키를 자동 저장하고, 이후에는 쿠키 파일로 완전 헤드리스 실행이 가능하다.
+
+### 사전 준비
+
+```
+chromedriver.exe --port=9515
+```
+
+### 쿠키 생성 (최초 1회)
+
+```
+cargo run -- goodreads --url "https://www.goodreads.com/book/show/8576972/reviews" --webdriver http://localhost:9515
+```
+
+브라우저가 열리면 Goodreads 로그인 → Enter → `goodreads_output/cookies.json` 자동 저장
+
+### 이후 실행 (완전 헤드리스)
+
+```
+cargo run -- goodreads --url "https://www.goodreads.com/book/show/8576972/reviews" --url "https://www.goodreads.com/book/show/12345/reviews" --workers 2 --max-reviews 100 --headless --cookie-file goodreads_output/cookies.json --webdriver http://localhost:9515
+```
+
+### URL 파일로 입력
+
+```
+cargo run -- goodreads --input ./books.txt --workers 3 --max-reviews 200 --headless --cookie-file goodreads_output/cookies.json --webdriver http://localhost:9515
+```
+
+```
+# books.txt
+https://www.goodreads.com/book/show/8576972/reviews
+https://www.goodreads.com/book/show/12345/reviews
+```
+
+### 주요 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--url` | — | 도서 리뷰 URL (반복 사용 가능) |
+| `--input` | — | URL 목록 파일 (한 줄에 하나) |
+| `--max-reviews` | 0 | 도서당 최대 리뷰 수 (0 = 무제한) |
+| `--workers` | 3 | 병렬 Chrome 세션 수 |
+| `--webdriver` | `http://localhost:9515` | ChromeDriver 엔드포인트 |
+| `--headless` | false | 헤드리스 모드 (`--cookie-file`과 함께 사용) |
+| `--cookie-file` | — | 쿠키 파일 경로 (첫 실행 후 자동 생성) |
+| `--profile-dir` | `goodreads_profile` | Chrome 프로필 디렉토리 (로그인 단계에서만 사용) |
+| `--max-idle-rounds` | 5 | 새 리뷰 없을 때 종료까지 허용 라운드 수 |
+| `--out-dir` | `goodreads_output` | 결과 저장 디렉토리 |
+
+### 출력 파일
+
+`goodreads_output/goodreads_reviews.csv` (UTF-8 BOM)
+
+| 컬럼 | 설명 |
+|------|------|
+| `reviewer` | 작성자 |
+| `rating` | 별점 (1~5, 없으면 빈값) |
+| `date` | 작성일 |
+| `review_url` | 리뷰 고유 URL |
 | `review_text` | 리뷰 본문 |
 
 ---

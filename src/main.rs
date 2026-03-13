@@ -13,6 +13,7 @@ mod plan_g;
 mod plan_h;
 mod plan_i;
 mod plan_j;
+mod plan_k;
 mod test_mode;
 mod plan_f;
 
@@ -353,6 +354,49 @@ enum Commands {
         out_dir: String,
     },
 
+    /// Goodreads 리뷰 병렬 수집 — 무한 스크롤 + Show more reviews (Plan K)
+    Goodreads {
+        /// 리뷰 페이지 URL (반복 사용 가능)
+        #[arg(long)]
+        url: Vec<String>,
+
+        /// URL 목록 파일 (한 줄에 URL 하나)
+        #[arg(long)]
+        input: Option<String>,
+
+        /// 병렬 워커(Chrome 세션) 수
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// ChromeDriver 엔드포인트
+        #[arg(long, default_value = "http://localhost:9515")]
+        webdriver: String,
+
+        /// 헤드리스 모드 (--cookie-file과 함께 사용)
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+
+        /// 쿠키 파일 경로 (첫 실행 후 goodreads_output/cookies.json에 자동 저장)
+        #[arg(long)]
+        cookie_file: Option<String>,
+
+        /// Chrome 프로필 디렉토리 (로그인 세션 유지 — 로그인 단계에서만 사용)
+        #[arg(long, default_value = "goodreads_profile")]
+        profile_dir: String,
+
+        /// 책당 수집할 최대 리뷰 수 (0 = 무제한)
+        #[arg(long, default_value_t = 0)]
+        max_reviews: usize,
+
+        /// 새 리뷰 없을 때 종료까지 허용 라운드 수
+        #[arg(long, default_value_t = 5)]
+        max_idle_rounds: usize,
+
+        /// 결과 저장 디렉토리
+        #[arg(long, default_value = "goodreads_output")]
+        out_dir: String,
+    },
+
     /// Crawl URLs (file and/or repeated --url)
     Crawl {
         /// Input file path (one URL per line)
@@ -612,6 +656,38 @@ async fn main() -> Result<(), CrawlError> {
             })
             .await
             .map_err(|e| CrawlError::Parse(format!("amazon 오류: {e}")))?;
+        }
+
+        Commands::Goodreads { url, input, workers, webdriver, headless, cookie_file, profile_dir, max_reviews, max_idle_rounds, out_dir } => {
+            let mut urls: Vec<String> = url;
+            if let Some(path) = input {
+                let lines = std::fs::read_to_string(&path)
+                    .map_err(|e| CrawlError::Parse(format!("파일 읽기 실패 {path}: {e}")))?;
+                for line in lines.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && !line.starts_with('#') {
+                        urls.push(line.to_string());
+                    }
+                }
+            }
+            if urls.is_empty() {
+                return Err(CrawlError::Parse(
+                    "URL이 없습니다. --url 또는 --input을 지정하세요.".to_string(),
+                ));
+            }
+            plan_k::run(plan_k::PlanKConfig {
+                target_urls: urls,
+                workers,
+                webdriver_url: webdriver,
+                headless,
+                cookie_file,
+                profile_dir,
+                max_reviews,
+                max_idle_rounds,
+                out_dir,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("goodreads 오류: {e}")))?;
         }
 
         Commands::Scrape { url, max_posts, workers, out_dir } => {
