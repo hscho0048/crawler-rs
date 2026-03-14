@@ -243,9 +243,9 @@ async fn fetch_listing(
             )
         }
         (None, Some(q)) => {
-            // 전체 Reddit 검색 API
+            // 전체 Reddit 검색 API (https://www.reddit.com/search/?q=... 의 JSON 버전)
             format!(
-                "https://www.reddit.com/search.json?q={q}&sort={sort}&limit={limit}&count={count}&raw_json=1",
+                "https://www.reddit.com/search/.json?q={q}&sort={sort}&limit={limit}&count={count}&raw_json=1",
                 q = urlencoding::encode(q)
             )
         }
