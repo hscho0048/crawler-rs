@@ -18,7 +18,7 @@ use tracing::{info, warn};
 // ─────────────────────────────────────────────────────────────────
 
 pub struct RedditConfig {
-    pub subreddit:    String,
+    pub subreddit:    Option<String>,
     pub sort:         String,   // "new" | "hot" | "top" | "rising" | "relevance"
     pub limit:        usize,    // 페이지당 최대 게시글 수 (Reddit 최대 100)
     pub max_pages:    usize,
@@ -85,11 +85,14 @@ pub async fn run(cfg: RedditConfig) -> Result<(), Box<dyn std::error::Error + Se
     let mut all_comments: Vec<CommentRow> = Vec::new();
 
     let mut after: Option<String> = None;
+    let mut seen_count: usize = 0;
+
+    let scope_label = cfg.subreddit.as_deref().unwrap_or("all");
 
     for page_num in 0..cfg.max_pages {
-        info!("[r/{}] 페이지 {} 요청 중...", cfg.subreddit, page_num + 1);
+        info!("[r/{}] 페이지 {} 요청 중...", scope_label, page_num + 1);
 
-        let listing = match fetch_listing(&client, &cfg.subreddit, &cfg.sort, cfg.limit, after.as_deref(), cfg.search_query.as_deref()).await {
+        let listing = match fetch_listing(&client, cfg.subreddit.as_deref(), &cfg.sort, cfg.limit, after.as_deref(), seen_count, cfg.search_query.as_deref()).await {
             Some(v) => v,
             None    => { warn!("[중단] 응답 없음"); break; }
         };
@@ -104,7 +107,7 @@ pub async fn run(cfg: RedditConfig) -> Result<(), Box<dyn std::error::Error + Se
             .unwrap_or_default();
 
         if children.is_empty() {
-            info!("[종료] r/{} 게시글 없음", cfg.subreddit);
+            info!("[종료] r/{} 게시글 없음", scope_label);
             break;
         }
 
@@ -112,9 +115,17 @@ pub async fn run(cfg: RedditConfig) -> Result<(), Box<dyn std::error::Error + Se
         let page_posts: Vec<PostRow> = children
             .iter()
             .filter(|item| item.get("kind").and_then(|v| v.as_str()).unwrap_or("") == "t3")
-            .filter_map(|item| parse_post(item.get("data")?, &cfg.subreddit, &cfg.keywords))
+            .filter_map(|item| {
+                let subreddit_name = item.get("data")
+                    .and_then(|d| d.get("subreddit"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(scope_label)
+                    .to_string();
+                parse_post(item.get("data")?, &subreddit_name, &cfg.keywords)
+            })
             .collect();
 
+        seen_count += children.len();
         info!("  필터 통과: {}개", page_posts.len());
 
         // 댓글 병렬 수집
@@ -142,7 +153,7 @@ pub async fn run(cfg: RedditConfig) -> Result<(), Box<dyn std::error::Error + Se
         }
 
         if after.is_none() {
-            info!("[종료] r/{} 마지막 페이지", cfg.subreddit);
+            info!("[종료] r/{} 마지막 페이지", scope_label);
             break;
         }
 
@@ -216,22 +227,39 @@ async fn fetch_json(client: &reqwest::Client, url: &str) -> Option<Value> {
 
 async fn fetch_listing(
     client:       &reqwest::Client,
-    subreddit:    &str,
+    subreddit:    Option<&str>,
     sort:         &str,
     limit:        usize,
     after:        Option<&str>,
+    count:        usize,
     search_query: Option<&str>,
 ) -> Option<Value> {
-    let mut url = if let Some(q) = search_query {
-        // 서브레딧 내 검색 API
-        format!(
-            "https://www.reddit.com/r/{subreddit}/search.json?q={q}&restrict_sr=1&sort={sort}&limit={limit}&raw_json=1",
-            q = urlencoding::encode(q)
-        )
-    } else {
-        format!(
-            "https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}&raw_json=1"
-        )
+    let mut url = match (subreddit, search_query) {
+        (Some(sr), Some(q)) => {
+            // 서브레딧 내 검색 API
+            format!(
+                "https://www.reddit.com/r/{sr}/search.json?q={q}&restrict_sr=1&sort={sort}&limit={limit}&count={count}&raw_json=1",
+                q = urlencoding::encode(q)
+            )
+        }
+        (None, Some(q)) => {
+            // 전체 Reddit 검색 API
+            format!(
+                "https://www.reddit.com/search.json?q={q}&sort={sort}&limit={limit}&count={count}&raw_json=1",
+                q = urlencoding::encode(q)
+            )
+        }
+        (Some(sr), None) => {
+            format!(
+                "https://www.reddit.com/r/{sr}/{sort}.json?limit={limit}&count={count}&raw_json=1"
+            )
+        }
+        (None, None) => {
+            // 서브레딧 없이 검색어도 없으면 전체 new/hot 피드
+            format!(
+                "https://www.reddit.com/{sort}.json?limit={limit}&count={count}&raw_json=1"
+            )
+        }
     };
     if let Some(a) = after {
         url.push_str("&after=");

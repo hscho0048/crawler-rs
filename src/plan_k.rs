@@ -197,6 +197,7 @@ async fn run_worker(
     caps.add_arg("--window-size=1440,2200")?;
     caps.add_arg("--lang=en-US")?;
     caps.add_arg("--disable-blink-features=AutomationControlled")?;
+    caps.add_arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")?;
     caps.add_experimental_option("excludeSwitches", vec!["enable-automation"])?;
     caps.add_experimental_option("useAutomationExtension", false)?;
     if cfg.headless {
@@ -210,10 +211,21 @@ async fn run_worker(
     // 쿠키 주입
     driver.goto("https://www.goodreads.com/").await?;
     sleep(Duration::from_millis(1500)).await;
+    let mut cookie_ok = 0usize;
     for cookie in cookies.iter() {
-        driver.add_cookie(cookie.clone()).await.ok();
+        if driver.add_cookie(cookie.clone()).await.is_ok() {
+            cookie_ok += 1;
+        }
     }
-    sleep(Duration::from_millis(500)).await;
+    info!("워커 {id}: 쿠키 {cookie_ok}/{} 주입 완료", cookies.len());
+    // 쿠키 적용을 위해 페이지 재로드
+    driver.goto("https://www.goodreads.com/").await?;
+    sleep(Duration::from_millis(1500)).await;
+    if is_login_page(&driver).await {
+        driver.quit().await.ok();
+        return Err(anyhow!("워커 {id}: 쿠키 주입 후에도 로그인 페이지 — 쿠키가 만료되었거나 유효하지 않습니다."));
+    }
+    info!("워커 {id}: 로그인 상태 확인됨");
 
     loop {
         let target_url = {
@@ -250,8 +262,28 @@ async fn run_worker(
 
 async fn crawl_one(driver: &WebDriver, cfg: &PlanKConfig, target_url: &str) -> Result<Vec<ReviewRow>> {
     safe_goto(driver, target_url, 5, 1500).await?;
-    sleep(Duration::from_millis(3000)).await;
+    // React 컴포넌트 렌더링 대기: 페이지 높이가 안정될 때까지 최대 15초
+    wait_for_content(driver, 15_000).await;
     dismiss_overlays(driver).await?;
+    if is_login_page(driver).await {
+        return Err(anyhow!("로그인 페이지 감지 — 쿠키가 만료되었거나 URL이 로그인을 요구합니다: {target_url}"));
+    }
+
+    // "Show previous reviews" 버튼 클릭 (있으면)
+    if let Ok(btn) = driver.find(By::Css("button:has([data-testid='loadPrev'])")).await {
+        let _ = btn.scroll_into_view().await;
+        let _ = btn.click().await;
+        info!("  'Show previous reviews' 클릭 완료");
+        sleep(Duration::from_millis(2500)).await;
+    }
+
+    // 디버그: 페이지 HTML 덤프 (셀렉터 확인용)
+    {
+        let html = driver.source().await.unwrap_or_default();
+        let dump_path = format!("{}/debug_page.html", cfg.out_dir);
+        let _ = fs::write(&dump_path, &html);
+        info!("디버그 HTML 덤프: {dump_path} ({}바이트)", html.len());
+    }
 
     let mut all_reviews: HashMap<String, ReviewRow> = HashMap::new();
     let mut idle_rounds = 0usize;
@@ -378,6 +410,29 @@ async fn eval_js(driver: &WebDriver, js: &str) -> Value {
 // 헬퍼: 페이지 안정화 대기
 // ─────────────────────────────────────────
 
+/// 페이지 높이가 연속 2회 동일할 때까지 대기 (React 동적 렌더링 완료 감지)
+async fn wait_for_content(driver: &WebDriver, timeout_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last_height: i64 = -1;
+    let mut stable = 0usize;
+    while Instant::now() < deadline {
+        sleep(Duration::from_millis(800)).await;
+        let height = eval_js(driver, "return document.body ? document.body.scrollHeight : 0;")
+            .await
+            .as_i64()
+            .unwrap_or(0);
+        if height > 0 && height == last_height {
+            stable += 1;
+            if stable >= 2 {
+                return;
+            }
+        } else {
+            stable = 0;
+            last_height = height;
+        }
+    }
+}
+
 async fn wait_until_stable(driver: &WebDriver, timeout_ms: u64) {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     while Instant::now() < deadline {
@@ -423,21 +478,19 @@ async fn is_login_page(driver: &WebDriver) -> bool {
         .map(|u| u.to_string().to_lowercase())
         .unwrap_or_default();
 
-    if url.contains("sign_in") || url.contains("login") {
+    if url.contains("sign_in") || url.contains("/login") {
         return true;
     }
 
-    let body = eval_js(
+    // 실제 로그인 폼(이메일 input + 비밀번호 input)이 존재하는지 확인
+    let has_login_form = eval_js(
         driver,
-        "return document.body ? (document.body.innerText || '').toLowerCase() : '';",
+        r#"return !!(document.querySelector('input[type="email"], input[name="user[email]"]') &&
+                     document.querySelector('input[type="password"]'));"#,
     )
     .await;
-    let body = body.as_str().unwrap_or("");
-    ["sign in", "email", "password"]
-        .iter()
-        .filter(|k| body.contains(**k))
-        .count()
-        >= 2
+
+    has_login_form.as_bool().unwrap_or(false)
 }
 
 // ─────────────────────────────────────────

@@ -270,9 +270,9 @@ enum Commands {
 
     /// Reddit 서브레딧 크롤링 (공개 JSON API, ChromeDriver 불필요)
     Reddit {
-        /// 서브레딧 이름 (예: minimalism)
+        /// 서브레딧 이름 (예: minimalism). 생략 시 전체 Reddit에서 검색
         #[arg(long)]
-        subreddit: String,
+        subreddit: Option<String>,
 
         /// 정렬 방식 (new | hot | top | rising)
         #[arg(long, default_value = "new")]

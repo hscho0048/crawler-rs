@@ -7,6 +7,8 @@
 # 크롤링 결과
 /out/
 /amazon_output/
+/goodreads_output/
+/goodreads_profile/
 
 # 로그
 *.log
@@ -22,4 +24,4 @@ chromedriver
 # 배포 패키지
 *.zip
 
-asin.txt
+*.txt
