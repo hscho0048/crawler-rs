@@ -17,11 +17,26 @@
 cookies.json
 *.cookies.json
 
-# 크롬드라이버 바이너리
+# 계정 정보가 포함된 설정 파일 (민감 정보)
+instagram_config.json
+*_secret.json
+*_private.json
+
+# 웹드라이버 바이너리
 chromedriver.exe
 chromedriver
+geckodriver.exe
+geckodriver
 
 # 배포 패키지
 *.zip
 
+# 입력 데이터 파일
 *.txt
+!urls.example.txt
+
+# 크롤링 결과 CSV
+*.csv
+
+# 계정/설정 파일 (민감 정보)
+*_config.json

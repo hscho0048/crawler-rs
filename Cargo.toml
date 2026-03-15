@@ -3,6 +3,10 @@ name = "naver_crawler_engine"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "instagram"
+path = "src/plan_l.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
@@ -49,3 +53,6 @@ rand = "0.8"
 
 # Plan I (Threads)
 rust_xlsxwriter = "0.75"
+
+# Plan L (Instagram)
+dotenvy = "0.15"

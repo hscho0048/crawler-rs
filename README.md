@@ -17,9 +17,11 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 | **I** | WebDriver 병렬 Worker Pool | Threads.com 키워드 검색 (로그인 필요) | O |
 | **J** | WebDriver 병렬 Worker Pool | Amazon 상품 리뷰 (로그인 필요, 쿠키 재사용) | O |
 | **K** | WebDriver 병렬 Worker Pool | Goodreads 도서 리뷰 (로그인 필요, 쿠키 재사용) | O |
+| **L** | WebDriver (Firefox/Geckodriver) | Instagram 해시태그 게시글·댓글 (로그인 필요) | O (Geckodriver) |
 
 > Plan C / D는 ChromeDriver 없이 Chrome에 직접 CDP로 연결한다. Chrome 설치만 필요.
 > Plan G는 Reddit 공개 JSON API를 사용하므로 Chrome, ChromeDriver, 계정 모두 불필요.
+> Plan L은 ChromeDriver 대신 **Geckodriver + Firefox**를 사용하며 `instagram` 바이너리로 별도 빌드된다.
 
 ---
 
@@ -27,7 +29,8 @@ Rust 기반 멀티플랜 웹 크롤러. 사이트 특성에 맞게 플랜을 선
 
 - Rust stable (2021 edition)
 - Chrome 브라우저 (Plan C / D)
-- ChromeDriver (Plan B / E / F / H / I, Chrome 버전과 일치해야 함)
+- ChromeDriver (Plan B / E / F / H / I / J / K, Chrome 버전과 일치해야 함)
+- Firefox + Geckodriver (Plan L)
 
 ```
 cargo build --release
@@ -638,6 +641,154 @@ https://www.goodreads.com/book/show/12345/reviews
 | `date` | 작성일 |
 | `review_url` | 리뷰 고유 URL |
 | `review_text` | 리뷰 본문 |
+
+---
+
+## Plan L — Instagram 해시태그 크롤링
+
+Instagram 해시태그 페이지에서 게시글·댓글을 순차 수집한다.
+ChromeDriver 대신 **Geckodriver(Firefox)** 를 사용하며, 별도 바이너리(`instagram`)로 빌드된다.
+
+### 사전 준비
+
+1. Firefox 설치
+2. [Geckodriver](https://github.com/mozilla/geckodriver/releases) 다운로드
+
+**워커 1개 (기본):**
+```
+geckodriver.exe --port 4444
+```
+
+**워커 N개 병렬 처리 시: 포트를 N개 띄워야 한다**
+
+Geckodriver는 포트 하나당 세션 하나만 허용하므로, `--workers N`으로 실행하려면 포트도 N개 필요하다.
+워커 0 → 4444, 워커 1 → 4445, 워커 2 → 4446 순서로 자동 할당된다.
+
+```
+# 터미널 3개를 열어 각각 실행
+geckodriver.exe --port 4444
+geckodriver.exe --port 4445
+geckodriver.exe --port 4446
+```
+
+그 다음 `--workers 3`으로 실행하면 된다. `webdriver_url`의 포트가 base port가 된다.
+
+3. 환경변수 또는 설정 파일로 Instagram 계정 정보 제공 (아래 참고)
+
+### 한 줄 실행
+
+**워커 1개 (기본):**
+```
+cargo run --bin instagram --release -- --config instagram_config.json --input keywords.txt --max-posts 100 --max-comments 50 --min-comment-len 10
+```
+
+**워커 3개 병렬 (geckodriver 4444~4446 포트 사전 실행 필요):**
+```
+cargo run --bin instagram --release -- --config instagram_config.json --input keywords.txt --workers 3 --max-posts 100 --max-comments 50 --min-comment-len 10
+```
+
+### 빌드 후 실행
+
+```
+cargo build --release --bin instagram
+./target/release/instagram --config instagram_config.json --input keywords.txt --workers 3 --max-posts 100 --max-comments 50 --min-comment-len 10
+```
+
+### 설정 파일 (`instagram_config.json`)
+
+프로젝트 루트에 생성되어 있는 `instagram_config.json`을 수정해서 사용한다.
+이 파일은 `.gitignore`에 등록되어 있으므로 git에 올라가지 않는다.
+
+```json
+{
+  "username": "your_instagram_id",
+  "password": "your_password",
+  "webdriver_url": "http://localhost:4444",
+  "headless": false,
+  "workers": 1,
+  "max_posts_per_tag": 100,
+  "max_scan_per_tag": 5000,
+  "max_comments_per_post": 50,
+  "min_comment_len": 10,
+  "output_dir": "./out",
+  "accept_language": "en-US,en;q=0.9",
+  "browser_locale": "en-US",
+  "window_width": 1440,
+  "window_height": 2000,
+  "block_images": false,
+  "disable_webrtc": false
+}
+```
+
+| 필드 | 기본값 | 설명 |
+|------|--------|------|
+| `username` | — | Instagram 아이디 (필수) |
+| `password` | — | Instagram 비밀번호 (필수) |
+| `webdriver_url` | `http://localhost:4444` | Geckodriver 엔드포인트 |
+| `headless` | `false` | 헤드리스 모드 |
+| `workers` | `1` | 병렬 Firefox 세션 수 (현재 Geckodriver 제한으로 1 권장) |
+| `max_posts_per_tag` | `100` | 태그당 최대 저장 게시글 수 |
+| `max_scan_per_tag` | `5000` | 태그당 최대 스캔 게시글 수 |
+| `max_comments_per_post` | `50` | 게시글당 최대 수집 댓글 수 |
+| `min_comment_len` | `0` | 수집할 댓글의 최소 글자 수 (미만 댓글 제외) |
+| `output_dir` | `.` | 결과 저장 디렉토리 |
+| `firefox_binary` | — | Firefox 실행파일 경로 (기본 위치 외 설치 시) |
+| `proxy_url` | — | 프록시 URL (예: `http://host:8080`, `socks5://host:1080`) |
+| `user_agent` | — | Firefox User-Agent 오버라이드 |
+| `accept_language` | `en-US,en;q=0.9` | 브라우저 언어 설정 |
+| `block_images` | `false` | 이미지 로드 차단 (속도 향상) |
+| `disable_webrtc` | `false` | WebRTC 비활성화 (IP 노출 방지) |
+
+### 동작 흐름
+
+1. Firefox 1개로 로그인 → 쿠키 추출 후 드라이버 종료
+2. `workers`개의 Firefox 세션을 동시에 실행
+3. 각 세션은 쿠키를 주입해 재로그인 없이 시작
+4. 공유 큐에서 키워드를 하나씩 가져가 병렬 수집
+5. 키워드별 CSV 파일로 저장 (파일 단위로 분리되므로 충돌 없음)
+
+### keywords.txt 형식
+
+```
+# 주석은 # 으로 시작
+# 탭 구분: 라벨<TAB>키워드  (라벨 생략 시 키워드가 라벨이 됨)
+러닝화
+러닝화추천	runningshoe
+나이키	nike
+```
+
+### 명령어 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--config <파일>` | — | JSON 설정 파일 경로 |
+| `--input <파일>` | `keywords.txt` | 키워드 목록 파일 |
+| `--output-dir <경로>` | `.` | 결과 저장 디렉토리 |
+| `--max-posts <N>` | `100` | 태그당 최대 수집 게시글 수 |
+| `--max-comments <N>` | `50` | 게시글당 최대 수집 댓글 수 |
+| `--min-comment-len <N>` | `0` | 수집할 댓글 최소 글자 수 |
+| `--workers <N>` | `1` | 병렬 Firefox 세션 수 |
+
+### 환경변수로 오버라이드
+
+JSON 파일 대신 또는 함께 사용할 수 있다. 우선순위: **CLI > 환경변수 > JSON > 기본값**
+
+```
+set IG_USERNAME=your_instagram_id
+set IG_PASSWORD=your_password
+set MANUAL_LOGIN=true          # 브라우저에서 직접 로그인할 경우
+```
+
+### 출력 파일
+
+키워드별로 두 파일이 생성된다:
+
+| 파일 | 컬럼 | 설명 |
+|------|------|------|
+| `{키워드}_insta.csv` | `label`, `keyword`, `no`, `date`, `author`, `article`, `hashtags`, `favorites`, `comment_count`, `post_url`, `platform` | 게시글 |
+| `{키워드}_comments.csv` | `no`, `keyword`, `author`, `text`, `datetime`, `likes` | 댓글 |
+
+> 2FA / 로그인 챌린지가 감지되면 크롤링이 중단된다. 이 경우 `MANUAL_LOGIN=true`로 설정해 수동 로그인 후 Enter를 누른다.
 
 ---
 

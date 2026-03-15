@@ -250,14 +250,17 @@ async fn fetch_listing(
             )
         }
         (Some(sr), None) => {
+            // relevance는 검색 API 전용 — 피드 수집 시 hot으로 fallback
+            let listing_sort = if sort == "relevance" { "hot" } else { sort };
             format!(
-                "https://www.reddit.com/r/{sr}/{sort}.json?limit={limit}&count={count}&raw_json=1"
+                "https://www.reddit.com/r/{sr}/{listing_sort}.json?limit={limit}&count={count}&raw_json=1"
             )
         }
         (None, None) => {
-            // 서브레딧 없이 검색어도 없으면 전체 new/hot 피드
+            // 서브레딧 없이 검색어도 없으면 전체 피드, relevance → hot fallback
+            let listing_sort = if sort == "relevance" { "hot" } else { sort };
             format!(
-                "https://www.reddit.com/{sort}.json?limit={limit}&count={count}&raw_json=1"
+                "https://www.reddit.com/{listing_sort}.json?limit={limit}&count={count}&raw_json=1"
             )
         }
     };
