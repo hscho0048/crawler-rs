@@ -1,16 +1,20 @@
 use anyhow::{bail, Context, Result};
 use csv::Writer;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use thirtyfour::extensions::cdp::ChromeDevTools;
 use thirtyfour::prelude::*;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 const MAX_PAGES_PER_PRODUCT: usize = 300;
+const REVIEW_API_BATCH_SIZE: usize = 5;
 const SLEEP_SHORT_MS: u64 = 800;
 const SLEEP_MEDIUM_MS: u64 = 1500;
 
@@ -46,7 +50,8 @@ pub async fn run_plan_e_parallel(
         let queue   = queue.clone();
 
         joinset.spawn(async move {
-            let driver = match build_driver(&wd, headless).await {
+            let profile_dir = smartstore_profile_base().join(format!("worker_{worker_id}"));
+            let driver = match build_driver(&wd, headless, Some(&profile_dir)).await {
                 Ok(d)  => d,
                 Err(e) => {
                     eprintln!("[ERROR] 워커 {worker_id} 드라이버 생성 실패: {e}");
@@ -60,7 +65,7 @@ pub async fn run_plan_e_parallel(
                 let url = queue.lock().await.pop_front();
                 let Some(url) = url else { break };
 
-                match crawl_product_reviews_next_only(&driver, &url, MAX_PAGES_PER_PRODUCT).await {
+                match crawl_product_reviews_next_only(&driver, &wd, &url, MAX_PAGES_PER_PRODUCT).await {
                     Ok(rows) => {
                         println!("[INFO] 워커 {worker_id} 완료: {url} | {}개", rows.len());
                         results.extend(rows);
@@ -91,20 +96,55 @@ pub async fn run_plan_e_parallel(
     Ok(dedupe_rows(all))
 }
 
-pub async fn build_driver(webdriver_url: &str, headless: bool) -> Result<WebDriver> {
+fn smartstore_profile_base() -> PathBuf {
+    std::env::var_os("SMARTSTORE_CHROME_PROFILE_BASE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("target")
+                .join("smartstore_chrome_profiles")
+        })
+}
+
+pub async fn build_driver(
+    webdriver_url: &str,
+    headless: bool,
+    profile_dir: Option<&Path>,
+) -> Result<WebDriver> {
     let mut caps = DesiredCapabilities::chrome();
     caps.add_arg("--start-maximized")?;
+    caps.add_arg("--window-size=1600,1400")?;
+    caps.add_arg("--lang=ko-KR")?;
+    caps.add_arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")?;
     caps.add_arg("--disable-blink-features=AutomationControlled")?;
     caps.add_experimental_option("excludeSwitches", vec!["enable-automation"])?;
     caps.add_experimental_option("useAutomationExtension", false)?;
+    caps.set_base_capability("goog:loggingPrefs", json!({ "performance": "ALL" }))?;
 
     if headless {
         caps.add_arg("--headless=new")?;
     }
 
+    if let Some(profile_dir) = profile_dir {
+        std::fs::create_dir_all(profile_dir)
+            .with_context(|| format!("Chrome profile directory create failed: {}", profile_dir.display()))?;
+        caps.add_arg(&format!("--user-data-dir={}", profile_dir.display()))?;
+    }
+
     let driver = WebDriver::new(webdriver_url, caps)
         .await
         .context("WebDriver 연결 실패")?;
+
+    let dev_tools = ChromeDevTools::new(driver.handle.clone());
+    let _ = dev_tools
+        .execute_cdp_with_params(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({
+                "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            }),
+        )
+        .await;
 
     driver
         .execute(
@@ -239,6 +279,400 @@ async fn wait_if_captcha(driver: &WebDriver, timeout_secs: u64) {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ReviewQueryRequest {
+    api_url: String,
+    headers: Value,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebDriverLogResponse {
+    value: Vec<WebDriverLogEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebDriverLogEntry {
+    message: String,
+}
+
+fn sanitize_review_headers(headers: &Map<String, Value>) -> Value {
+    let mut out = Map::new();
+    for (key, value) in headers {
+        let lower = key.to_ascii_lowercase();
+        let allowed = matches!(
+            lower.as_str(),
+            "accept"
+                | "content-type"
+                | "x-client-lct"
+                | "x-client-rtk"
+                | "x-client-rts"
+                | "x-client-version"
+                | "x-service-type"
+        );
+        if allowed {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+fn normalize_smartstore_product_url(raw_url: &str) -> String {
+    let Ok(mut parsed) = ::url::Url::parse(raw_url) else {
+        return raw_url.to_string();
+    };
+
+    let is_smartstore = parsed
+        .host_str()
+        .map(|host| host.eq_ignore_ascii_case("smartstore.naver.com"))
+        .unwrap_or(false);
+    if !is_smartstore || !parsed.path().contains("/products/") {
+        return raw_url.to_string();
+    }
+
+    parsed.set_query(None);
+    parsed.set_fragment(Some("REVIEW"));
+    parsed.to_string()
+}
+
+fn review_query_request_from_log(entry: &WebDriverLogEntry) -> Option<ReviewQueryRequest> {
+    let event: Value = serde_json::from_str(&entry.message).ok()?;
+    let message = event.get("message")?;
+    if message.get("method")?.as_str()? != "Network.requestWillBeSent" {
+        return None;
+    }
+
+    let request = message.get("params")?.get("request")?;
+    let api_url = request.get("url")?.as_str()?;
+    if !api_url.contains("/i/v1/contents/reviews/query-pages") {
+        return None;
+    }
+
+    let payload: Value = serde_json::from_str(request.get("postData")?.as_str()?).ok()?;
+    let headers = sanitize_review_headers(request.get("headers")?.as_object()?);
+
+    Some(ReviewQueryRequest {
+        api_url: api_url.to_string(),
+        headers,
+        payload,
+    })
+}
+
+async fn read_performance_logs(driver: &WebDriver, webdriver_url: &str) -> Result<Vec<WebDriverLogEntry>> {
+    let session_id = driver.session_id().to_string();
+    let endpoint = format!(
+        "{}/session/{}/log",
+        webdriver_url.trim_end_matches('/'),
+        session_id
+    );
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .json(&json!({ "type": "performance" }))
+        .send()
+        .await
+        .context("WebDriver performance log request failed")?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("WebDriver performance log response read failed")?;
+    if !status.is_success() {
+        bail!("WebDriver performance log failed: {status} {body}");
+    }
+
+    let parsed: WebDriverLogResponse =
+        serde_json::from_str(&body).context("WebDriver performance log parse failed")?;
+    Ok(parsed.value)
+}
+
+async fn wait_for_review_query_request(
+    driver: &WebDriver,
+    webdriver_url: &str,
+    timeout_secs: u64,
+) -> Result<ReviewQueryRequest> {
+    let started = tokio::time::Instant::now();
+    let mut last_request = None;
+
+    while started.elapsed() < Duration::from_secs(timeout_secs) {
+        let logs = read_performance_logs(driver, webdriver_url).await.unwrap_or_default();
+        for entry in &logs {
+            if let Some(request) = review_query_request_from_log(entry) {
+                last_request = Some(request);
+            }
+        }
+
+        if let Some(request) = last_request.take() {
+            return Ok(request);
+        }
+
+        sleep(Duration::from_millis(400)).await;
+    }
+
+    bail!("SmartStore review API request was not captured");
+}
+
+async fn click_review_all_button(driver: &WebDriver) -> Result<bool> {
+    let js = r#"
+    const done = arguments[arguments.length - 1];
+    const REVIEW = '\uB9AC\uBDF0';
+    const ALL = '\uC804\uCCB4\uBCF4\uAE30';
+    const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const visible = (el) => !!(el.offsetParent || el.getClientRects().length);
+    let attempts = 0;
+
+    function step() {
+        const controls = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+        const target = controls.find((el) => {
+            const text = textOf(el);
+            return visible(el) && text.includes(REVIEW) && text.includes(ALL);
+        });
+
+        if (target) {
+            target.scrollIntoView({ block: 'center' });
+            setTimeout(() => {
+                target.click();
+                done(true);
+            }, 150);
+            return;
+        }
+
+        if (attempts === 0) {
+            const tab = controls.find((el) => {
+                const text = textOf(el);
+                return visible(el) && text.includes(REVIEW) && !text.includes(ALL) && text.length < 40;
+            });
+            if (tab) {
+                tab.scrollIntoView({ block: 'center' });
+                tab.click();
+            }
+        }
+
+        window.scrollBy(0, Math.max(500, window.innerHeight * 0.7));
+        attempts += 1;
+        if (attempts >= 12) {
+            done(false);
+        } else {
+            setTimeout(step, 450);
+        }
+    }
+
+    step();
+    "#;
+
+    let clicked: bool = driver
+        .execute_async(js, Vec::<Value>::new())
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_value(v.json().clone()).ok())
+        .unwrap_or(false);
+
+    if clicked {
+        sleep(Duration::from_millis(SLEEP_SHORT_MS)).await;
+    }
+
+    Ok(clicked)
+}
+
+async fn open_product_and_capture_review_query(
+    driver: &WebDriver,
+    webdriver_url: &str,
+    url: &str,
+    timeout_secs: u64,
+) -> Result<ReviewQueryRequest> {
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 1..=3 {
+        let _ = read_performance_logs(driver, webdriver_url).await;
+
+        driver.get(url).await?;
+        driver
+            .query(By::Tag("body"))
+            .wait(Duration::from_secs(timeout_secs), Duration::from_millis(300))
+            .first()
+            .await
+            .context("body load failed")?;
+
+        let captcha_wait = if attempt == 1 { 120 } else { 10 };
+        wait_if_captcha(driver, captcha_wait).await;
+        sleep(Duration::from_millis(SLEEP_MEDIUM_MS)).await;
+
+        let clicked = click_review_all_button(driver).await?;
+        if !clicked {
+            println!("[WARN] review-all button was not found on attempt {attempt}");
+        }
+
+        match wait_for_review_query_request(driver, webdriver_url, timeout_secs).await {
+            Ok(request) => return Ok(request),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < 3 {
+                    println!("[WARN] SmartStore review API capture retry {attempt}/3");
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    match last_error {
+        Some(e) => Err(e).context("SmartStore review API capture failed"),
+        None => bail!("SmartStore review API capture failed"),
+    }
+}
+
+async fn fetch_review_pages_batch(
+    driver: &WebDriver,
+    request: &ReviewQueryRequest,
+    pages: &[u32],
+) -> Result<Vec<Value>> {
+    let js = r#"
+    const url = arguments[0];
+    const headers = arguments[1];
+    const basePayload = arguments[2];
+    const pages = arguments[3];
+    const done = arguments[arguments.length - 1];
+
+    Promise.all(pages.map(async (page) => {
+        const payload = Object.assign({}, basePayload, { page });
+        const response = await fetch(url, {
+            method: 'POST',
+            headers,
+            credentials: 'include',
+            body: JSON.stringify(payload),
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            return { __error: true, page, status: response.status, body: text.slice(0, 1000) };
+        }
+        try {
+            return JSON.parse(text);
+        } catch (error) {
+            return { __error: true, page, status: response.status, body: text.slice(0, 1000) };
+        }
+    })).then(done).catch((error) => done([{ __error: true, message: String(error) }]));
+    "#;
+
+    let value = driver
+        .execute_async(
+            js,
+            vec![
+                Value::String(request.api_url.clone()),
+                request.headers.clone(),
+                request.payload.clone(),
+                json!(pages),
+            ],
+        )
+        .await
+        .context("SmartStore review API fetch failed")?;
+
+    let pages: Vec<Value> =
+        serde_json::from_value(value.json().clone()).context("SmartStore review API JSON parse failed")?;
+
+    for page in &pages {
+        if page.get("__error").and_then(Value::as_bool).unwrap_or(false) {
+            bail!("SmartStore review API page fetch failed: {page}");
+        }
+    }
+
+    Ok(pages)
+}
+
+fn api_review_date(item: &Value) -> Option<String> {
+    let date = item.get("createDate")?.as_str()?.trim();
+    if date.len() >= 10 {
+        Some(date[..10].to_string())
+    } else if date.is_empty() {
+        None
+    } else {
+        Some(date.to_string())
+    }
+}
+
+fn review_rows_from_api_page(product_url: &str, page_no: u32, page: &Value) -> Vec<ReviewRow> {
+    let mut rows = Vec::new();
+    let Some(contents) = page.get("contents").and_then(Value::as_array) else {
+        return rows;
+    };
+
+    for (idx, item) in contents.iter().enumerate() {
+        let review = item
+            .get("reviewContent")
+            .and_then(Value::as_str)
+            .map(text_clean)
+            .unwrap_or_default();
+        if review.is_empty() {
+            continue;
+        }
+
+        let rating = item
+            .get("reviewScore")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32);
+        let date = api_review_date(item);
+        let writer = item
+            .get("maskedWriterId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let id = item.get("id").map(Value::to_string).unwrap_or_default();
+        let raw_text = text_clean(&format!(
+            "id={id} writer={writer} date={} rating={} content={review}",
+            date.clone().unwrap_or_default(),
+            rating.map(|value| value.to_string()).unwrap_or_default()
+        ));
+
+        rows.push(ReviewRow {
+            product_url: product_url.to_string(),
+            page: page_no,
+            idx_in_page: idx + 1,
+            review,
+            rating,
+            date,
+            raw_text,
+        });
+    }
+
+    rows
+}
+
+async fn crawl_product_reviews_with_review_api(
+    driver: &WebDriver,
+    webdriver_url: &str,
+    url: &str,
+    max_pages: usize,
+) -> Result<Vec<ReviewRow>> {
+    let crawl_url = normalize_smartstore_product_url(url);
+    let request = open_product_and_capture_review_query(driver, webdriver_url, &crawl_url, 20).await?;
+    let first_pages = fetch_review_pages_batch(driver, &request, &[1]).await?;
+    let Some(first_page) = first_pages.first() else {
+        return Ok(Vec::new());
+    };
+
+    let total_pages = first_page
+        .get("totalPages")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let page_limit = total_pages.min(max_pages);
+    println!("[INFO] SmartStore review API pages: {page_limit}/{total_pages}");
+
+    let mut all_rows = review_rows_from_api_page(url, 1, first_page);
+
+    let mut next_page = 2usize;
+    while next_page <= page_limit {
+        let end_page = (next_page + REVIEW_API_BATCH_SIZE - 1).min(page_limit);
+        let pages: Vec<u32> = (next_page..=end_page).map(|page| page as u32).collect();
+        let batch = fetch_review_pages_batch(driver, &request, &pages).await?;
+
+        for (page_no, page_value) in pages.into_iter().zip(batch.iter()) {
+            all_rows.extend(review_rows_from_api_page(url, page_no, page_value));
+        }
+
+        println!("[INFO] SmartStore review API fetched page {end_page}/{page_limit}");
+        next_page = end_page + 1;
+    }
+
+    Ok(dedupe_rows(all_rows))
+}
+
 async fn open_product_and_go_review_tab(driver: &WebDriver, url: &str, timeout_secs: u64) -> Result<()> {
     driver.get(url).await?;
     driver
@@ -291,6 +725,82 @@ async fn open_product_and_go_review_tab(driver: &WebDriver, url: &str, timeout_s
 
     sleep(Duration::from_millis(SLEEP_MEDIUM_MS)).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn maps_smartstore_review_api_content_to_review_rows() {
+        let page = json!({
+            "contents": [{
+                "id": 4967111202_u64,
+                "reviewScore": 5,
+                "reviewContent": "  good\nwasher  ",
+                "createDate": "2026-05-02T06:27:58.071+00:00",
+                "maskedWriterId": "z2****"
+            }]
+        });
+
+        let rows = review_rows_from_api_page("https://smartstore.naver.com/s/products/1", 3, &page);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].page, 3);
+        assert_eq!(rows[0].idx_in_page, 1);
+        assert_eq!(rows[0].review, "good washer");
+        assert_eq!(rows[0].rating, Some(5.0));
+        assert_eq!(rows[0].date.as_deref(), Some("2026-05-02"));
+        assert!(rows[0].raw_text.contains("z2****"));
+    }
+
+    #[test]
+    fn keeps_only_fetch_safe_review_headers() {
+        let headers = json!({
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Cookie": "NID=secret",
+            "Referer": "https://smartstore.naver.com/s/products/1",
+            "x-client-lct": "/s/products/1",
+            "x-client-rtk": "token",
+            "x-client-rts": "123",
+            "x-client-version": "20260521092348",
+            "x-service-type": "NONE"
+        });
+
+        let sanitized = sanitize_review_headers(headers.as_object().unwrap());
+        let map = sanitized.as_object().unwrap();
+
+        assert!(map.contains_key("Accept"));
+        assert!(map.contains_key("Content-Type"));
+        assert!(map.contains_key("x-client-rtk"));
+        assert!(!map.contains_key("Cookie"));
+        assert!(!map.contains_key("Referer"));
+    }
+
+    #[test]
+    fn normalizes_smartstore_product_urls_before_browser_entry() {
+        let normalized = normalize_smartstore_product_url(
+            "https://smartstore.naver.com/lgbestjisung/products/7779247404?NaPm=tracking#REVIEW",
+        );
+
+        assert_eq!(
+            normalized,
+            "https://smartstore.naver.com/lgbestjisung/products/7779247404#REVIEW"
+        );
+    }
+
+    #[test]
+    fn write_csv_creates_empty_output_file() {
+        let path = Path::new("target").join("plan_e_empty_reviews.csv");
+        let _ = std::fs::remove_file(&path);
+
+        write_csv(path.to_str().unwrap(), &[]).unwrap();
+
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 async fn try_click_latest_order(driver: &WebDriver) -> bool {
@@ -549,9 +1059,25 @@ async fn click_next_page_only(driver: &WebDriver) -> bool {
     false
 }
 
-async fn crawl_product_reviews_next_only(driver: &WebDriver, url: &str, max_pages: usize) -> Result<Vec<ReviewRow>> {
+async fn crawl_product_reviews_next_only(
+    driver: &WebDriver,
+    webdriver_url: &str,
+    url: &str,
+    max_pages: usize,
+) -> Result<Vec<ReviewRow>> {
     println!("{}", "=".repeat(80));
     println!("[INFO] 상품 시작: {url}");
+
+    match crawl_product_reviews_with_review_api(driver, webdriver_url, url, max_pages).await {
+        Ok(rows) => {
+            println!("[INFO] SmartStore review API collected {} rows", rows.len());
+            return Ok(rows);
+        }
+        Err(e) => {
+            eprintln!("[WARN] SmartStore review API failed; falling back to DOM pagination");
+            eprintln!("{e:#}");
+        }
+    }
 
     open_product_and_go_review_tab(driver, url, 15).await?;
     let _ = try_click_latest_order(driver).await;
@@ -627,6 +1153,13 @@ fn dedupe_rows(rows: Vec<ReviewRow>) -> Vec<ReviewRow> {
 }
 
 pub fn write_csv(path: &str, rows: &[ReviewRow]) -> Result<()> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("CSV output directory create failed: {}", parent.display()))?;
+        }
+    }
+
     let mut wtr = Writer::from_path(path).with_context(|| format!("CSV 생성 실패: {path}"))?;
     for row in rows {
         wtr.serialize(row)?;
