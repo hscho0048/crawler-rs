@@ -685,7 +685,7 @@ fn build_page_url(base: &Url, page: u32) -> Url {
 }
 
 /// 현재 페이지 테이블에서 일반글 row 파싱 (공지 제외) — JS 단일 호출로 일괄 추출
-async fn scrape_page_rows(driver: &WebDriver, base_url: &Url) -> Vec<ArticleRef> {
+pub async fn scrape_page_rows(driver: &WebDriver, base_url: &Url) -> Vec<ArticleRef> {
     let script = r#"
         const rows = document.querySelectorAll('table.article-table > tbody > tr:not(.board-notice)');
         return Array.from(rows).map(row => {

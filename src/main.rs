@@ -16,6 +16,7 @@ mod plan_j;
 mod plan_k;
 mod plan_m;
 mod plan_n;
+mod plan_o;
 mod test_mode;
 mod plan_f;
 
@@ -174,6 +175,58 @@ enum Commands {
     },
 
     /// Threads.com 키워드 크롤링 — 로그인 후 검색·댓글 병렬 수집 (Plan I)
+    /// Coupang product review crawler (parallel by review page, Plan O)
+    #[command(about = "Coupang product review crawler (parallel by review page, Plan O)")]
+    Coupang {
+        /// Product URL (repeatable)
+        #[arg(long)]
+        url: Vec<String>,
+
+        /// Product URL list file, one URL per line
+        #[arg(long)]
+        input: Option<String>,
+
+        /// First review page to crawl
+        #[arg(long, default_value_t = 1)]
+        start_page: usize,
+
+        /// Number of review pages to crawl per product
+        #[arg(long, default_value_t = 10)]
+        max_pages: usize,
+
+        /// Parallel Chrome sessions
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// WebDriver endpoint for --browser-fetch mode
+        #[arg(long, default_value = "http://localhost:4444")]
+        webdriver: String,
+
+        /// Headless Chrome mode for --browser-fetch mode
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+
+        /// Output CSV path
+        #[arg(long, default_value = "out/coupang_reviews.csv")]
+        output: String,
+
+        /// Cookie header copied from an allowed browser session
+        #[arg(long)]
+        cookie: Option<String>,
+
+        /// File containing a raw Cookie header or a JSON cookie array
+        #[arg(long)]
+        cookie_file: Option<String>,
+
+        /// Delay between page requests per worker
+        #[arg(long, default_value_t = 1000)]
+        page_delay_ms: u64,
+
+        /// Use Chrome to call the review API with browser cookies
+        #[arg(long)]
+        browser_fetch: bool,
+    },
+
     ItdaCommunity {
         #[arg(long, default_value_t = 1)]
         start_page: usize,
@@ -317,6 +370,14 @@ enum Commands {
         /// URL CSV saved by a previous cafe-open run
         #[arg(long)]
         url_csv: Option<String>,
+
+        /// Parallel Chrome sessions for collecting list pages
+        #[arg(long = "list-workers", default_value_t = 1)]
+        list_workers: usize,
+
+        /// Number of list pages to collect by changing the page query (0 = infer from max-posts and size)
+        #[arg(long = "max-pages", default_value_t = 0)]
+        max_pages: usize,
 
         /// 수집할 최대 게시글 수
         #[arg(long, default_value_t = 20)]
@@ -658,6 +719,54 @@ async fn async_main() -> Result<(), CrawlError> {
             info!(output, "완료");
         }
 
+        Commands::Coupang {
+            url,
+            input,
+            start_page,
+            max_pages,
+            workers,
+            webdriver,
+            headless,
+            output,
+            cookie,
+            cookie_file,
+            page_delay_ms,
+            browser_fetch,
+        } => {
+            let mut urls: Vec<String> = url;
+            if let Some(path) = input {
+                let lines = std::fs::read_to_string(&path)
+                    .map_err(|e| CrawlError::Parse(format!("file read failed {path}: {e}")))?;
+                for line in lines.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && !line.starts_with('#') {
+                        urls.push(line.to_string());
+                    }
+                }
+            }
+            if urls.is_empty() {
+                return Err(CrawlError::Parse(
+                    "URL이 없습니다. --url 또는 --input을 지정하세요.".to_string(),
+                ));
+            }
+
+            plan_o::run(plan_o::PlanOConfig {
+                product_urls: urls,
+                start_page,
+                max_pages,
+                workers,
+                output,
+                cookie,
+                cookie_file,
+                page_delay_ms,
+                browser_fetch,
+                webdriver_url: webdriver,
+                headless,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("coupang error: {e}")))?;
+        }
+
         Commands::ItdaCommunity {
             start_page,
             max_pages,
@@ -746,12 +855,14 @@ async fn async_main() -> Result<(), CrawlError> {
             .map_err(|e| CrawlError::Parse(format!("blog-search 오류: {e}")))?;
         }
 
-        Commands::CafeOpen { url, url_csv, max_posts, workers, webdriver, out_dir, from_row, to_row, url_only } => {
+        Commands::CafeOpen { url, url_csv, max_posts, list_workers, max_pages, workers, webdriver, out_dir, from_row, to_row, url_only } => {
             plan_f::run(
                 &webdriver,
                 url.as_deref(),
                 url_csv.as_deref(),
                 max_posts,
+                list_workers,
+                max_pages,
                 workers,
                 &out_dir,
                 from_row,

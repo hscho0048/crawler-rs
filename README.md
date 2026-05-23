@@ -39,6 +39,44 @@ cargo run --bin naver_crawler_engine -- smartstore --url "https://smartstore.nav
 
 한 줄씩 안정적으로 돌릴 때는 `--workers 1`을 쓰면 됩니다.
 
+## Coupang 리뷰
+
+쿠팡 리뷰 조각 API(`/vp/product/reviews`)로 리뷰 페이지를 병렬 수집합니다. 작업 단위는 `상품 URL + 리뷰 페이지 번호`라서 `--workers 3`이면 1페이지, 2페이지, 3페이지가 각각 다른 워커에 배정됩니다. ChromeDriver는 필요 없습니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 3 --output out\coupang_reviews.csv
+```
+
+403 Access Denied가 나오면 일반 브라우저에서 접근 가능한 세션의 Cookie 헤더를 `coupang_cookie.txt`에 저장한 뒤 함께 넘깁니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie-file .\coupang_cookie.txt --page-delay-ms 1500 --output out\coupang_reviews.csv
+```
+
+쿠키를 넣어도 403이면 ChromeDriver를 켜고 브라우저 안에서 리뷰 API를 호출하는 `--browser-fetch`를 사용합니다.
+
+```powershell
+.\chromedriver.exe --port=4444
+```
+
+```powershell
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie-file .\coupang_cookie.txt --browser-fetch --webdriver http://localhost:4444 --page-delay-ms 1500 --output out\coupang_reviews.csv
+```
+
+11~20페이지를 이어서 수집하려면 시작 페이지를 11로 잡습니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 11 --max-pages 10 --workers 3 --output out\coupang_reviews_011_020.csv
+```
+
+URL 파일도 사용할 수 있습니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- coupang --input .\coupang_urls.txt --start-page 1 --max-pages 10 --workers 3 --output out\coupang_reviews.csv
+```
+
+출력 컬럼은 `product_url`, `product_id`, `page`, `idx_in_page`, `product_title`, `product_option`, `author`, `rating`, `date`, `helpful_count`, `headline`, `review_body`, `survey_answer`, `raw_text`입니다.
+
 ## Plan F: 네이버 카페 공개 접근 크롤러
 
 기존 명령어는 그대로 동작합니다. `--url`로 카페 게시판을 넣으면 URL 목록을 먼저 수집하고, 상세 페이지를 병렬로 수집합니다.
@@ -52,6 +90,14 @@ URL 목록만 저장하고 상세 수집은 하지 않으려면 `--url-only`를 
 ```powershell
 cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/cafename/board" --max-posts 100 --url-only --webdriver http://localhost:4444 --out-dir out
 ```
+
+`f-e/cafes/.../menus/...` 주소도 그대로 넣을 수 있습니다. `--list-workers`는 URL 목록 수집용 워커 수이고, `--workers`는 상세 글 수집용 워커 수입니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-posts 500 --list-workers 5 --workers 3 --url-only --webdriver http://localhost:4444 --out-dir out
+```
+
+목록 페이지 수를 직접 지정하려면 `--max-pages`를 붙입니다. 예를 들어 `page=1&size=50 --max-pages 10`이면 1페이지부터 10페이지까지 URL을 수집합니다.
 
 특정 행 범위만 수집할 수 있습니다. 행 번호는 수집된 URL 목록 기준 1부터 시작합니다.
 

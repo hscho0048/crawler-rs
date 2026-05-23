@@ -8,7 +8,7 @@
 ///   2단계) Worker Pool —
 ///            제목으로 네이버 검색 → 원본 게시글 번호로 결과 URL 매칭
 ///            → 매칭된 URL로 ArticleRef 교체 → plan_b의 scrape_with_driver 호출
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ use url::Url;
 use crate::{
     errors::CrawlError,
     models::PostData,
-    plan_b::{collect_article_refs_by_url, open_driver, scrape_with_driver, ArticleRef},
+    plan_b::{collect_article_refs_by_url, open_driver, scrape_page_rows, scrape_with_driver, ArticleRef},
 };
 
 const PLAN_F_PAGE_LOAD_TIMEOUT_SECS: u64 = 120;
@@ -40,6 +40,8 @@ pub async fn run(
     cafe_url: Option<&str>,
     url_csv: Option<&str>,
     max_posts: usize,
+    list_workers: usize,
+    max_pages: usize,
     workers: usize,
     out_dir: &str,
     from_row: usize,
@@ -86,9 +88,21 @@ pub async fn run(
             max_posts
         };
 
-        let list_driver = open_plan_f_driver(webdriver_url).await?;
-        let refs = collect_article_refs_by_url(&list_driver, &list_url, collect_limit).await;
-        let _ = list_driver.quit().await;
+        let refs = if list_workers.max(1) > 1 || max_pages > 0 {
+            collect_article_refs_parallel(
+                webdriver_url,
+                &list_url,
+                collect_limit,
+                list_workers,
+                max_pages,
+            )
+            .await?
+        } else {
+            let list_driver = open_plan_f_driver(webdriver_url).await?;
+            let refs = collect_article_refs_by_url(&list_driver, &list_url, collect_limit).await;
+            let _ = list_driver.quit().await;
+            refs
+        };
         info!("  게시글 {}개 수집 완료", refs.len());
         refs
     };
@@ -200,6 +214,163 @@ pub async fn run(
 /// 1) 제목으로 네이버 카페 검색
 /// 2) 원본 게시글 번호(URL 마지막 숫자)로 검색 결과 URL 매칭
 /// 3) cru 속성(JWT 포함 URL)으로 ArticleRef를 교체한 뒤 plan_b의 scrape_with_driver 호출
+async fn collect_article_refs_parallel(
+    webdriver_url: &str,
+    list_url: &Url,
+    max_posts: usize,
+    list_workers: usize,
+    max_pages: usize,
+) -> Result<Vec<ArticleRef>, CrawlError> {
+    let page_urls = page_urls_for_collection(list_url, max_posts, max_pages);
+    if page_urls.is_empty() {
+        return Ok(vec![]);
+    }
+
+    info!(
+        "list page collection start: pages={}, workers={}",
+        page_urls.len(),
+        list_workers.max(1)
+    );
+
+    let queue = Arc::new(Mutex::new(page_urls));
+    let mut joinset: JoinSet<Vec<(usize, Vec<ArticleRef>)>> = JoinSet::new();
+
+    for worker_id in 0..list_workers.max(1) {
+        let wd = webdriver_url.to_string();
+        let queue = queue.clone();
+
+        joinset.spawn(async move {
+            let driver = match open_plan_f_driver(&wd).await {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("list worker {worker_id} driver open failed: {e}");
+                    return vec![];
+                }
+            };
+            let mut collected = Vec::new();
+
+            loop {
+                let job = queue.lock().await.pop_front();
+                let Some((page_no, page_url)) = job else {
+                    break;
+                };
+
+                info!("list worker {worker_id} page {page_no} collect: {page_url}");
+                let rows = collect_article_refs_page(&driver, &page_url).await;
+                info!(
+                    "list worker {worker_id} page {page_no} rows={}",
+                    rows.len()
+                );
+                collected.push((page_no, rows));
+            }
+
+            let _ = driver.quit().await;
+            collected
+        });
+    }
+
+    let mut pages = Vec::new();
+    while let Some(result) = joinset.join_next().await {
+        match result {
+            Ok(batch) => pages.extend(batch),
+            Err(e) => warn!("list worker join error: {e}"),
+        }
+    }
+
+    pages.sort_by_key(|(page_no, _)| *page_no);
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    for (_, rows) in pages {
+        for article in rows {
+            let key = article.url.as_str().to_string();
+            if !seen.insert(key) {
+                continue;
+            }
+            refs.push(article);
+            if refs.len() >= max_posts.max(1) {
+                return Ok(refs);
+            }
+        }
+    }
+
+    Ok(refs)
+}
+
+async fn collect_article_refs_page(
+    driver: &thirtyfour::WebDriver,
+    page_url: &Url,
+) -> Vec<ArticleRef> {
+    if let Err(e) = driver.goto(page_url.as_str()).await {
+        warn!("list page move failed: {e}");
+        return vec![];
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let ready = driver
+            .execute(
+                "return document.querySelector('table.article-table') !== null;",
+                vec![],
+            )
+            .await
+            .ok()
+            .and_then(|v| v.json().as_bool())
+            .unwrap_or(false);
+        if ready || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    scrape_page_rows(driver, page_url).await
+}
+
+fn page_urls_for_collection(
+    list_url: &Url,
+    max_posts: usize,
+    max_pages: usize,
+) -> VecDeque<(usize, Url)> {
+    let start_page = query_usize(list_url, "page").unwrap_or(1).max(1);
+    let page_size = query_usize(list_url, "size").unwrap_or(50).max(1);
+    let page_count = if max_pages > 0 {
+        max_pages
+    } else {
+        (max_posts.max(1) + page_size - 1) / page_size
+    };
+
+    (0..page_count)
+        .map(|idx| {
+            let page_no = start_page + idx;
+            (page_no, list_page_url(list_url, page_no, page_size))
+        })
+        .collect()
+}
+
+fn query_usize(url: &Url, name: &str) -> Option<usize> {
+    url.query_pairs()
+        .find_map(|(key, value)| (key == name).then(|| value.parse::<usize>().ok()).flatten())
+}
+
+fn list_page_url(base: &Url, page: usize, size: usize) -> Url {
+    let mut url = base.clone();
+    let mut pairs = url
+        .query_pairs()
+        .filter(|(key, _)| key != "page" && key != "size")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    pairs.push(("page".to_string(), page.to_string()));
+    pairs.push(("size".to_string(), size.to_string()));
+
+    url.set_query(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+    url
+}
+
 async fn via_search_then_scrape(
     driver: &thirtyfour::WebDriver,
     client: &reqwest::Client,
@@ -558,5 +729,37 @@ mod tests {
         let selected = detail_refs_after_url_save(refs, 1, 0, true).unwrap();
 
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn builds_query_page_urls_from_fe_menu_url() {
+        let url = Url::parse(
+            "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50",
+        )
+        .unwrap();
+
+        let pages = page_urls_for_collection(&url, 120, 0).into_iter().collect::<Vec<_>>();
+
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages[0].0, 1);
+        assert_eq!(pages[1].0, 2);
+        assert_eq!(
+            pages[1].1.as_str(),
+            "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=2&size=50"
+        );
+    }
+
+    #[test]
+    fn max_pages_overrides_inferred_list_pages() {
+        let url = Url::parse(
+            "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=7&size=50",
+        )
+        .unwrap();
+
+        let pages = page_urls_for_collection(&url, 10, 2).into_iter().collect::<Vec<_>>();
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].0, 7);
+        assert!(pages[1].1.as_str().contains("page=8"));
     }
 }
