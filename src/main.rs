@@ -387,13 +387,17 @@ enum Commands {
         #[arg(long, default_value_t = 3)]
         workers: usize,
 
-        /// WebDriver 엔드포인트 (예: http://localhost:4444)
-        #[arg(long)]
-        webdriver: String,
+        /// WebDriver endpoint. Repeat for a GeckoDriver pool.
+        #[arg(long, required = true)]
+        webdriver: Vec<String>,
 
         /// 결과 저장 디렉토리
         #[arg(long, default_value = "out")]
         out_dir: String,
+
+        /// WebDriver browser: chrome or firefox
+        #[arg(long, default_value = "chrome")]
+        browser: String,
 
         /// URL list row to start detail crawling from (1-based)
         #[arg(long = "from-row", default_value = "1")]
@@ -855,7 +859,7 @@ async fn async_main() -> Result<(), CrawlError> {
             .map_err(|e| CrawlError::Parse(format!("blog-search 오류: {e}")))?;
         }
 
-        Commands::CafeOpen { url, url_csv, max_posts, list_workers, max_pages, workers, webdriver, out_dir, from_row, to_row, url_only } => {
+        Commands::CafeOpen { url, url_csv, max_posts, list_workers, max_pages, workers, webdriver, out_dir, browser, from_row, to_row, url_only } => {
             plan_f::run(
                 &webdriver,
                 url.as_deref(),
@@ -868,6 +872,7 @@ async fn async_main() -> Result<(), CrawlError> {
                 from_row,
                 to_row,
                 url_only,
+                &browser,
             )
                 .await
                 .map_err(|e| CrawlError::Parse(format!("cafe-open 오류: {e}")))?;

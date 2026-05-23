@@ -14,7 +14,7 @@ use url::Url;
 
 use thirtyfour::cookie::{Cookie, SameSite};
 use thirtyfour::prelude::*;
-use thirtyfour::ChromeCapabilities;
+use thirtyfour::{Capabilities, ChromeCapabilities, DesiredCapabilities};
 
 use crate::{
     errors::CrawlError,
@@ -22,6 +22,24 @@ use crate::{
 };
 
 const CAFE_LIST_READY_TIMEOUT_SECS: u64 = 180;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserKind {
+    Chrome,
+    Firefox,
+}
+
+impl BrowserKind {
+    pub fn parse(value: &str) -> Result<Self, CrawlError> {
+        match value.to_ascii_lowercase().as_str() {
+            "chrome" => Ok(Self::Chrome),
+            "firefox" | "gecko" | "geckodriver" => Ok(Self::Firefox),
+            other => Err(CrawlError::Parse(format!(
+                "unsupported browser '{other}'. use chrome or firefox"
+            ))),
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // 쿠키 (네이버 로그인 세션)
@@ -1173,7 +1191,17 @@ async fn find_text(driver: &WebDriver, selectors: &[&str]) -> Option<String> {
 // ─────────────────────────────────────────────────────────────────
 
 pub async fn open_driver(webdriver_url: &str) -> Result<WebDriver, CrawlError> {
-    let caps = chrome_caps()?;
+    open_driver_with_browser(webdriver_url, BrowserKind::Chrome).await
+}
+
+pub async fn open_driver_with_browser(
+    webdriver_url: &str,
+    browser: BrowserKind,
+) -> Result<WebDriver, CrawlError> {
+    let caps: Capabilities = match browser {
+        BrowserKind::Chrome => chrome_caps()?.into(),
+        BrowserKind::Firefox => firefox_caps()?.into(),
+    };
     let driver = WebDriver::new(webdriver_url, caps)
         .await
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
@@ -1186,6 +1214,17 @@ pub async fn open_driver(webdriver_url: &str) -> Result<WebDriver, CrawlError> {
         .await
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     Ok(driver)
+}
+
+fn firefox_caps() -> Result<thirtyfour::FirefoxCapabilities, CrawlError> {
+    let mut caps = DesiredCapabilities::firefox();
+    caps.set_headless()
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    caps.add_arg("--width=1920")
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    caps.add_arg("--height=1080")
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    Ok(caps)
 }
 
 fn chrome_caps() -> Result<ChromeCapabilities, CrawlError> {

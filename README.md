@@ -16,6 +16,25 @@ ChromeDriver를 실행합니다.
 .\chromedriver.exe --port=4444
 ```
 
+Firefox/GeckoDriver로 `cafe-open`을 실행하려면 GeckoDriver를 대신 켭니다.
+
+```powershell
+.\geckodriver.exe --port 4444
+```
+
+Firefox를 병렬로 쓰려면 GeckoDriver를 포트별로 여러 개 켭니다. 포트 4444~4451이면 8개 워커용입니다.
+
+```powershell
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4444"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4445"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4446"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4447"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4448"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4449"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4450"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4451"
+```
+
 다른 터미널에서 크롤러를 실행합니다.
 
 ```powershell
@@ -80,6 +99,18 @@ URL만 저장하려면 `--url-only`를 붙입니다.
 
 ```powershell
 cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-posts 500 --list-workers 5 --url-only --webdriver http://localhost:4444 --out-dir out
+```
+
+GeckoDriver를 쓸 때는 `--browser firefox`를 붙입니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 10 --list-workers 1 --url-only --browser firefox --webdriver http://localhost:4444 --out-dir out
+```
+
+GeckoDriver 여러 포트를 워커에 분산하려면 `--webdriver`를 반복해서 넘깁니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 200 --list-workers 8 --url-only --browser firefox --webdriver http://localhost:4444 --webdriver http://localhost:4445 --webdriver http://localhost:4446 --webdriver http://localhost:4447 --webdriver http://localhost:4448 --webdriver http://localhost:4449 --webdriver http://localhost:4450 --webdriver http://localhost:4451 --out-dir out
 ```
 
 URL 수집과 상세 수집을 한 번에 실행합니다.
@@ -215,6 +246,8 @@ out\naver_search_comments.csv
 `--workers`는 상세 페이지를 동시에 열 Chrome 세션 수입니다. 안정성이 중요하면 `1`, 속도가 중요하면 PC 사양에 맞춰 `3~10` 사이에서 조절합니다.
 
 `--list-workers`는 카페 목록 URL 수집 전용 워커 수입니다. `cafe-open`에서만 사용합니다.
+
+`--browser firefox`는 `cafe-open`을 GeckoDriver/Firefox로 실행할 때 씁니다. 생략하면 기본값은 Chrome입니다. Firefox는 GeckoDriver 포트 하나당 세션 하나라서 병렬 수집 시 `--webdriver`를 여러 번 넘겨야 합니다.
 
 `--max-posts`는 최대 수집 글 수입니다. 카페에서 `page=1&size=50 --max-posts 500`이면 대략 10페이지를 대상으로 URL을 모읍니다.
 

@@ -26,7 +26,10 @@ use url::Url;
 use crate::{
     errors::CrawlError,
     models::PostData,
-    plan_b::{collect_article_refs_by_url, open_driver, scrape_page_rows, scrape_with_driver, ArticleRef},
+    plan_b::{
+        collect_article_refs_by_url, open_driver_with_browser, scrape_page_rows,
+        scrape_with_driver, ArticleRef, BrowserKind,
+    },
 };
 
 const PLAN_F_PAGE_LOAD_TIMEOUT_SECS: u64 = 180;
@@ -37,7 +40,7 @@ const PLAN_F_LIST_READY_TIMEOUT_SECS: u64 = 180;
 // ─────────────────────────────────────────────────────────────────
 
 pub async fn run(
-    webdriver_url: &str,
+    webdriver_urls: &[String],
     cafe_url: Option<&str>,
     url_csv: Option<&str>,
     max_posts: usize,
@@ -48,7 +51,10 @@ pub async fn run(
     from_row: usize,
     to_row: usize,
     url_only: bool,
+    browser: &str,
 ) -> Result<(), CrawlError> {
+    let browser = BrowserKind::parse(browser)?;
+    let webdriver_urls = normalize_webdriver_urls(webdriver_urls)?;
     info!("🚀 [Plan F] 미가입 네이버 카페 크롤링 시작");
     if let Some(url_csv) = url_csv {
         info!(" - URL CSV : {}", url_csv);
@@ -91,15 +97,16 @@ pub async fn run(
 
         let refs = if list_workers.max(1) > 1 || max_pages > 0 {
             collect_article_refs_parallel(
-                webdriver_url,
+                &webdriver_urls,
                 &list_url,
                 collect_limit,
                 list_workers,
                 max_pages,
+                browser,
             )
             .await?
         } else {
-            let list_driver = open_plan_f_driver(webdriver_url).await?;
+            let list_driver = open_plan_f_driver(webdriver_endpoint(&webdriver_urls, 0), browser).await?;
             let refs = collect_article_refs_by_url(&list_driver, &list_url, collect_limit).await;
             let _ = list_driver.quit().await;
             refs
@@ -135,13 +142,14 @@ pub async fn run(
     let done = Arc::new(AtomicUsize::new(0));
     let mut joinset: JoinSet<Vec<Result<PostData, CrawlError>>> = JoinSet::new();
 
-    for worker_id in 0..workers.max(1) {
-        let wd = webdriver_url.to_string();
+    let detail_workers = effective_worker_count(workers, browser, webdriver_urls.len());
+    for worker_id in 0..detail_workers {
+        let wd = webdriver_endpoint(&webdriver_urls, worker_id).to_string();
         let queue = queue.clone();
         let done = done.clone();
 
         joinset.spawn(async move {
-            let driver = match open_plan_f_driver(&wd).await {
+            let driver = match open_plan_f_driver(&wd, browser).await {
                 Ok(d) => d,
                 Err(e) => {
                     warn!("워커 {worker_id} 드라이버 실패: {e}");
@@ -215,12 +223,41 @@ pub async fn run(
 /// 1) 제목으로 네이버 카페 검색
 /// 2) 원본 게시글 번호(URL 마지막 숫자)로 검색 결과 URL 매칭
 /// 3) cru 속성(JWT 포함 URL)으로 ArticleRef를 교체한 뒤 plan_b의 scrape_with_driver 호출
+fn normalize_webdriver_urls(webdriver_urls: &[String]) -> Result<Vec<String>, CrawlError> {
+    let urls = webdriver_urls
+        .iter()
+        .map(|url| url.trim())
+        .filter(|url| !url.is_empty())
+        .map(|url| url.to_string())
+        .collect::<Vec<_>>();
+    if urls.is_empty() {
+        return Err(CrawlError::Parse(
+            "at least one --webdriver endpoint is required".to_string(),
+        ));
+    }
+    Ok(urls)
+}
+
+fn webdriver_endpoint(webdriver_urls: &[String], worker_id: usize) -> &str {
+    webdriver_urls[worker_id % webdriver_urls.len()].as_str()
+}
+
+fn effective_worker_count(requested: usize, browser: BrowserKind, webdriver_count: usize) -> usize {
+    let requested = requested.max(1);
+    if browser == BrowserKind::Firefox {
+        requested.min(webdriver_count.max(1))
+    } else {
+        requested
+    }
+}
+
 async fn collect_article_refs_parallel(
-    webdriver_url: &str,
+    webdriver_urls: &[String],
     list_url: &Url,
     max_posts: usize,
     list_workers: usize,
     max_pages: usize,
+    browser: BrowserKind,
 ) -> Result<Vec<ArticleRef>, CrawlError> {
     let page_urls = page_urls_for_collection(list_url, max_posts, max_pages);
     if page_urls.is_empty() {
@@ -230,18 +267,19 @@ async fn collect_article_refs_parallel(
     info!(
         "list page collection start: pages={}, workers={}",
         page_urls.len(),
-        list_workers.max(1)
+        effective_worker_count(list_workers, browser, webdriver_urls.len())
     );
 
     let queue = Arc::new(Mutex::new(page_urls));
     let mut joinset: JoinSet<Vec<(usize, Vec<ArticleRef>)>> = JoinSet::new();
 
-    for worker_id in 0..list_workers.max(1) {
-        let wd = webdriver_url.to_string();
+    let list_workers = effective_worker_count(list_workers, browser, webdriver_urls.len());
+    for worker_id in 0..list_workers {
+        let wd = webdriver_endpoint(webdriver_urls, worker_id).to_string();
         let queue = queue.clone();
 
         joinset.spawn(async move {
-            let driver = match open_plan_f_driver(&wd).await {
+            let driver = match open_plan_f_driver(&wd, browser).await {
                 Ok(d) => d,
                 Err(e) => {
                     warn!("list worker {worker_id} driver open failed: {e}");
@@ -662,8 +700,11 @@ fn url_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
-async fn open_plan_f_driver(webdriver_url: &str) -> Result<thirtyfour::WebDriver, CrawlError> {
-    let driver = open_driver(webdriver_url).await?;
+async fn open_plan_f_driver(
+    webdriver_url: &str,
+    browser: BrowserKind,
+) -> Result<thirtyfour::WebDriver, CrawlError> {
+    let driver = open_driver_with_browser(webdriver_url, browser).await?;
     driver
         .set_page_load_timeout(Duration::from_secs(PLAN_F_PAGE_LOAD_TIMEOUT_SECS))
         .await
