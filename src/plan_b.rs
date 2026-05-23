@@ -22,6 +22,7 @@ use crate::{
 };
 
 const CAFE_LIST_READY_TIMEOUT_SECS: u64 = 180;
+const NAVER_CAFE_MAX_LIST_PAGE: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserKind {
@@ -507,9 +508,8 @@ pub async fn crawl_plan_b_from_list(
     info!(total, "게시글 링크 수집 완료 → Worker Pool 스크랩 시작");
 
     if refs.is_empty() {
-        return vec![Err(CrawlError::Parse(
-            "게시글 링크를 찾지 못했습니다. CSS 선택자를 확인하세요.".into(),
-        ))];
+        info!("plan_b list is empty; skipping detail crawl");
+        return vec![];
     }
 
     // ── 2단계: Worker Pool 스크랩 ─────────────────────────────────
@@ -629,7 +629,7 @@ pub async fn collect_article_refs_by_url(
     let mut all: Vec<ArticleRef> = Vec::new();
     let mut page = 1u32;
 
-    loop {
+    while is_naver_cafe_list_page_in_range(page) {
         let page_url = build_page_url(base_url, page);
         info!("리스트 페이지 {page} 수집 중 → {page_url}");
 
@@ -679,6 +679,10 @@ pub async fn collect_article_refs_by_url(
         page += 1;
     }
 
+    if page > NAVER_CAFE_MAX_LIST_PAGE {
+        info!("네이버 카페 목록 페이지 1000 상한 도달 → 수집 종료");
+    }
+
     all
 }
 
@@ -703,6 +707,10 @@ fn build_page_url(base: &Url, page: u32) -> Url {
 
     url.set_query(Some(&query));
     url
+}
+
+fn is_naver_cafe_list_page_in_range(page: u32) -> bool {
+    (1..=NAVER_CAFE_MAX_LIST_PAGE).contains(&page)
 }
 
 /// 현재 페이지 테이블에서 일반글 row 파싱 (공지 제외) — JS 단일 호출로 일괄 추출
@@ -1245,4 +1253,31 @@ fn chrome_caps() -> Result<ChromeCapabilities, CrawlError> {
     caps.add_experimental_option("useAutomationExtension", false)
         .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
     Ok(caps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn naver_cafe_list_pages_stop_at_1000() {
+        assert!(is_naver_cafe_list_page_in_range(1));
+        assert!(is_naver_cafe_list_page_in_range(1000));
+        assert!(!is_naver_cafe_list_page_in_range(1001));
+    }
+
+    #[test]
+    fn build_page_url_replaces_page_and_size() {
+        let url = Url::parse(
+            "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=7&size=10",
+        )
+        .unwrap();
+
+        let page_url = build_page_url(&url, 1000);
+
+        assert_eq!(
+            page_url.as_str(),
+            "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1000&size=50"
+        );
+    }
 }

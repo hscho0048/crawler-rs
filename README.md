@@ -125,6 +125,31 @@ cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/
 cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 10 --list-workers 5 --url-only --webdriver http://localhost:4444 --out-dir out
 ```
 
+카페 사이드바의 게시판 링크를 전부 읽어서 게시판별 `cafe-open` 명령어를 `.ps1` 파일로 만들 수 있습니다. 생성되는 URL은 `page=1&size=50` 쿼리 형식입니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-posts 50000 --list-workers 10 --webdriver http://localhost:4444 --out-dir out
+```
+
+마지막 페이지를 아는 게시판들만 페이지 기준으로 돌리고 싶으면 `--max-pages`를 넣습니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-pages 57 --list-workers 10 --webdriver http://localhost:4444 --out-dir out
+```
+
+GeckoDriver 여러 포트용 명령어도 같은 방식으로 생성할 수 있습니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --browser firefox --max-posts 50000 --list-workers 8 --webdriver http://localhost:4444 --webdriver http://localhost:4445 --webdriver http://localhost:4446 --webdriver http://localhost:4447 --webdriver http://localhost:4448 --webdriver http://localhost:4449 --webdriver http://localhost:4450 --webdriver http://localhost:4451 --out-dir out
+```
+
+생성 파일은 기본적으로 `out\cafe_menu_commands_YYYYMMDD_HHMMSS.ps1` 이름으로 저장됩니다.
+이 스크립트를 실행하면 각 게시판은 `--url-only`로 URL CSV만 수집하고, 마지막에 `url` 기준 중복 제거를 해서 최종 파일 하나를 만듭니다.
+
+```text
+out\cafe_menu_urls_deduped_YYYYMMDD_HHMMSS.csv
+```
+
 `--list-workers`는 목록 URL 수집용 워커 수입니다. `--workers`는 상세 글 수집용 워커 수입니다.
 
 ```text
@@ -252,6 +277,8 @@ out\naver_search_comments.csv
 `--max-posts`는 최대 수집 글 수입니다. 카페에서 `page=1&size=50 --max-posts 500`이면 대략 10페이지를 대상으로 URL을 모읍니다.
 
 `--max-pages`는 페이지 수를 직접 지정할 때 씁니다.
+
+네이버 카페 목록 페이지는 최대 1000페이지까지만 요청합니다. `--max-posts`나 `--max-pages` 값이 더 커도 `page=1001` 이상은 만들지 않습니다.
 
 `--url-only`는 URL CSV만 저장하고 상세 수집을 건너뜁니다.
 

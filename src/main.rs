@@ -412,6 +412,45 @@ enum Commands {
         url_only: bool,
     },
 
+    /// Generate cafe-open commands from a Naver Cafe sidebar menu list
+    CafeMenuCommands {
+        /// Cafe page URL that contains the sidebar
+        #[arg(long)]
+        url: String,
+
+        /// WebDriver endpoint for opening the cafe page. Repeat to generate pooled commands.
+        #[arg(long, required = true)]
+        webdriver: Vec<String>,
+
+        /// WebDriver browser: chrome or firefox
+        #[arg(long, default_value = "chrome")]
+        browser: String,
+
+        /// Max posts to put in each generated cafe-open command
+        #[arg(long, default_value_t = 50000)]
+        max_posts: usize,
+
+        /// Max pages to put in each generated cafe-open command (0 = use max-posts)
+        #[arg(long = "max-pages", default_value_t = 0)]
+        max_pages: usize,
+
+        /// List workers to put in each generated cafe-open command
+        #[arg(long = "list-workers", default_value_t = 10)]
+        list_workers: usize,
+
+        /// Page size query value to put in generated menu URLs
+        #[arg(long, default_value_t = 50)]
+        size: usize,
+
+        /// Output directory for generated script and crawler outputs
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+
+        /// Output ps1 file path. Defaults to out/cafe_menu_commands_YYYYMMDD_HHMMSS.ps1
+        #[arg(long)]
+        output: Option<String>,
+    },
+
     /// Reddit 서브레딧 크롤링 (공개 JSON API, ChromeDriver 불필요)
     Reddit {
         /// 서브레딧 이름 (예: minimalism). 생략 시 전체 Reddit에서 검색
@@ -876,6 +915,33 @@ async fn async_main() -> Result<(), CrawlError> {
             )
                 .await
                 .map_err(|e| CrawlError::Parse(format!("cafe-open 오류: {e}")))?;
+        }
+
+        Commands::CafeMenuCommands {
+            url,
+            webdriver,
+            browser,
+            max_posts,
+            max_pages,
+            list_workers,
+            size,
+            out_dir,
+            output,
+        } => {
+            let output = plan_f::generate_menu_commands(plan_f::MenuCommandsConfig {
+                url,
+                webdriver_urls: webdriver,
+                browser,
+                max_posts,
+                max_pages,
+                list_workers,
+                size,
+                out_dir,
+                output,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("cafe-menu-commands error: {e}")))?;
+            info!("cafe menu commands saved: {}", output.display());
         }
 
         Commands::Reddit { subreddit, sort, limit, max_pages, max_comments, search_query, keyword, workers, user_agent, page_delay_ms, out_dir } => {
