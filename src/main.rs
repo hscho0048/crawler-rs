@@ -312,7 +312,11 @@ enum Commands {
     CafeOpen {
         /// 카페 게시판 URL (예: https://cafe.naver.com/cafename/board)
         #[arg(long)]
-        url: String,
+        url: Option<String>,
+
+        /// URL CSV saved by a previous cafe-open run
+        #[arg(long)]
+        url_csv: Option<String>,
 
         /// 수집할 최대 게시글 수
         #[arg(long, default_value_t = 20)]
@@ -329,6 +333,14 @@ enum Commands {
         /// 결과 저장 디렉토리
         #[arg(long, default_value = "out")]
         out_dir: String,
+
+        /// URL list row to start detail crawling from (1-based)
+        #[arg(long = "from-row", default_value = "1")]
+        from_row: usize,
+
+        /// URL list row to stop detail crawling at (0 = last collected row)
+        #[arg(long = "to-row", default_value = "0")]
+        to_row: usize,
     },
 
     /// Reddit 서브레딧 크롤링 (공개 JSON API, ChromeDriver 불필요)
@@ -488,8 +500,25 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), CrawlError> {
+fn main() -> Result<(), CrawlError> {
+    let handle = std::thread::Builder::new()
+        .name("crawler-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| CrawlError::Parse(format!("tokio runtime create failed: {e}")))?;
+            runtime.block_on(async_main())
+        })
+        .map_err(|e| CrawlError::Parse(format!("main thread spawn failed: {e}")))?;
+
+    handle
+        .join()
+        .map_err(|_| CrawlError::Parse("main thread panicked".to_string()))?
+}
+
+async fn async_main() -> Result<(), CrawlError> {
     // Logging
     fmt()
         .with_env_filter(
@@ -713,8 +742,17 @@ async fn main() -> Result<(), CrawlError> {
             .map_err(|e| CrawlError::Parse(format!("blog-search 오류: {e}")))?;
         }
 
-        Commands::CafeOpen { url, max_posts, workers, webdriver, out_dir } => {
-            plan_f::run(&webdriver, &url, max_posts, workers, &out_dir)
+        Commands::CafeOpen { url, url_csv, max_posts, workers, webdriver, out_dir, from_row, to_row } => {
+            plan_f::run(
+                &webdriver,
+                url.as_deref(),
+                url_csv.as_deref(),
+                max_posts,
+                workers,
+                &out_dir,
+                from_row,
+                to_row,
+            )
                 .await
                 .map_err(|e| CrawlError::Parse(format!("cafe-open 오류: {e}")))?;
         }
