@@ -29,7 +29,8 @@ use crate::{
     plan_b::{collect_article_refs_by_url, open_driver, scrape_page_rows, scrape_with_driver, ArticleRef},
 };
 
-const PLAN_F_PAGE_LOAD_TIMEOUT_SECS: u64 = 120;
+const PLAN_F_PAGE_LOAD_TIMEOUT_SECS: u64 = 180;
+const PLAN_F_LIST_READY_TIMEOUT_SECS: u64 = 180;
 
 // ─────────────────────────────────────────────────────────────────
 // 퍼블릭 진입점
@@ -305,7 +306,8 @@ async fn collect_article_refs_page(
         return vec![];
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(PLAN_F_LIST_READY_TIMEOUT_SECS);
     loop {
         let ready = driver
             .execute(

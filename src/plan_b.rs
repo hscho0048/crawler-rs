@@ -21,6 +21,8 @@ use crate::{
     models::{BodyImage, Comment, PostData, Source},
 };
 
+const CAFE_LIST_READY_TIMEOUT_SECS: u64 = 180;
+
 // ─────────────────────────────────────────────────────────────────
 // 쿠키 (네이버 로그인 세션)
 // ─────────────────────────────────────────────────────────────────
@@ -620,7 +622,8 @@ pub async fn collect_article_refs_by_url(
 
         // 게시글 테이블이 렌더링될 때까지 최대 5초 폴링 (고정 2초 sleep 대체)
         {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline =
+                std::time::Instant::now() + Duration::from_secs(CAFE_LIST_READY_TIMEOUT_SECS);
             loop {
                 let ready = driver
                     .execute(
