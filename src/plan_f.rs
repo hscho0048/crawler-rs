@@ -25,6 +25,8 @@ use crate::{
     plan_b::{ArticleRef, collect_article_refs_by_url, open_driver, scrape_with_driver},
 };
 
+const PLAN_F_PAGE_LOAD_TIMEOUT_SECS: u64 = 120;
+
 // ─────────────────────────────────────────────────────────────────
 // 퍼블릭 진입점
 // ─────────────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ pub async fn run(
 
     // ── 1단계: plan_b 그대로 목록 수집 ───────────────────────────
     info!("🔍 [1단계] 게시글 목록 수집 중...");
-    let list_driver = open_driver(webdriver_url).await?;
+    let list_driver = open_plan_f_driver(webdriver_url).await?;
     let refs = collect_article_refs_by_url(&list_driver, &list_url, max_posts).await;
     let _ = list_driver.quit().await;
     info!("  게시글 {}개 수집 완료", refs.len());
@@ -74,7 +76,7 @@ pub async fn run(
         let done  = done.clone();
 
         joinset.spawn(async move {
-            let driver = match open_driver(&wd).await {
+            let driver = match open_plan_f_driver(&wd).await {
                 Ok(d) => d,
                 Err(e) => { warn!("워커 {worker_id} 드라이버 실패: {e}"); return vec![]; }
             };
@@ -238,4 +240,13 @@ async fn via_search_then_scrape(
 
 fn url_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+async fn open_plan_f_driver(webdriver_url: &str) -> Result<thirtyfour::WebDriver, CrawlError> {
+    let driver = open_driver(webdriver_url).await?;
+    driver
+        .set_page_load_timeout(Duration::from_secs(PLAN_F_PAGE_LOAD_TIMEOUT_SECS))
+        .await
+        .map_err(|e| CrawlError::WebDriver(e.to_string()))?;
+    Ok(driver)
 }

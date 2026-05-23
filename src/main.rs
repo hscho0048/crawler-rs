@@ -14,6 +14,8 @@ mod plan_h;
 mod plan_i;
 mod plan_j;
 mod plan_k;
+mod plan_m;
+mod plan_n;
 mod test_mode;
 mod plan_f;
 
@@ -172,6 +174,67 @@ enum Commands {
     },
 
     /// Threads.com 키워드 크롤링 — 로그인 후 검색·댓글 병렬 수집 (Plan I)
+    ItdaCommunity {
+        #[arg(long, default_value_t = 1)]
+        start_page: usize,
+
+        #[arg(long, default_value_t = 43)]
+        max_pages: usize,
+
+        #[arg(long, default_value_t = 0)]
+        max_posts: usize,
+
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        #[arg(long, default_value = "http://localhost:4444")]
+        webdriver: String,
+
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+
+        #[arg(long, default_value_t = true)]
+        headless: bool,
+
+        #[arg(long, default_value = "target/itda_login_profile")]
+        profile_dir: String,
+    },
+
+    /// Naver search result crawler for Naver Blog and Tistory URLs (Plan N)
+    NaverSearch {
+        /// Full Naver search URL
+        #[arg(long)]
+        url: String,
+
+        /// Max search API pages / DOM scroll rounds
+        #[arg(long, default_value_t = 30)]
+        max_scrolls: usize,
+
+        /// Max detail URLs to crawl (0 = no limit)
+        #[arg(long, default_value_t = 0)]
+        max_posts: usize,
+
+        /// Parallel Chrome sessions for detail pages
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// WebDriver endpoint
+        #[arg(long, default_value = "http://localhost:4444")]
+        webdriver: String,
+
+        /// Output directory
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+
+        /// Headless Chrome mode
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+
+        /// Max clicks/pages for loading comments
+        #[arg(long, default_value_t = 50)]
+        comment_page_limit: usize,
+    },
+
     Threads {
         /// 검색 키워드
         #[arg(long)]
@@ -560,6 +623,54 @@ async fn main() -> Result<(), CrawlError> {
                 .map_err(|e| CrawlError::Parse(format!("CSV 저장 실패: {e}")))?;
 
             info!(output, "완료");
+        }
+
+        Commands::ItdaCommunity {
+            start_page,
+            max_pages,
+            max_posts,
+            workers,
+            webdriver,
+            out_dir,
+            headless,
+            profile_dir,
+        } => {
+            plan_m::run(plan_m::PlanMConfig {
+                start_page,
+                max_pages,
+                max_posts,
+                workers,
+                webdriver_url: webdriver,
+                out_dir,
+                headless_workers: headless,
+                profile_dir,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("itda-community error: {e}")))?;
+        }
+
+        Commands::NaverSearch {
+            url,
+            max_scrolls,
+            max_posts,
+            workers,
+            webdriver,
+            out_dir,
+            headless,
+            comment_page_limit,
+        } => {
+            plan_n::run(plan_n::PlanNConfig {
+                search_url: url,
+                max_scrolls,
+                max_posts,
+                workers,
+                webdriver_url: webdriver,
+                out_dir,
+                headless,
+                comment_page_limit,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("naver-search error: {e}")))?;
         }
 
         Commands::Threads {

@@ -1,4 +1,8 @@
-use std::{fs, io::Write as _, path::{Path, PathBuf}};
+use std::{
+    fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 
 use csv::Writer;
 use tracing::info;
@@ -53,8 +57,12 @@ pub fn write_comments_csv(out_dir: &Path, posts: &[PostData]) -> Result<PathBuf,
     let mut w = writer_with_bom(&path)?;
 
     w.write_record([
-        "post_url", "comment_id", "is_reply",
-        "author", "date", "content",
+        "post_url",
+        "comment_id",
+        "is_reply",
+        "author",
+        "date",
+        "content",
     ])?;
 
     let mut rows = 0usize;
@@ -83,8 +91,12 @@ pub fn write_images_csv(out_dir: &Path, posts: &[PostData]) -> Result<PathBuf, c
     let mut w = writer_with_bom(&path)?;
 
     w.write_record([
-        "post_url", "display_src",
-        "original_src", "original_width", "original_height", "file_size",
+        "post_url",
+        "display_src",
+        "original_src",
+        "original_width",
+        "original_height",
+        "file_size",
     ])?;
 
     let mut rows = 0usize;
@@ -94,8 +106,12 @@ pub fn write_images_csv(out_dir: &Path, posts: &[PostData]) -> Result<PathBuf, c
                 p.url.as_str(),
                 &img.src,
                 img.original_src.as_deref().unwrap_or(""),
-                &img.original_width.map(|n| n.to_string()).unwrap_or_default(),
-                &img.original_height.map(|n| n.to_string()).unwrap_or_default(),
+                &img.original_width
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                &img.original_height
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
                 &img.file_size.map(|n| n.to_string()).unwrap_or_default(),
             ])?;
             rows += 1;
