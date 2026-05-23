@@ -341,6 +341,10 @@ enum Commands {
         /// URL list row to stop detail crawling at (0 = last collected row)
         #[arg(long = "to-row", default_value = "0")]
         to_row: usize,
+
+        /// Save only the collected URL CSV and skip detail crawling
+        #[arg(long)]
+        url_only: bool,
     },
 
     /// Reddit 서브레딧 크롤링 (공개 JSON API, ChromeDriver 불필요)
@@ -742,7 +746,7 @@ async fn async_main() -> Result<(), CrawlError> {
             .map_err(|e| CrawlError::Parse(format!("blog-search 오류: {e}")))?;
         }
 
-        Commands::CafeOpen { url, url_csv, max_posts, workers, webdriver, out_dir, from_row, to_row } => {
+        Commands::CafeOpen { url, url_csv, max_posts, workers, webdriver, out_dir, from_row, to_row, url_only } => {
             plan_f::run(
                 &webdriver,
                 url.as_deref(),
@@ -752,6 +756,7 @@ async fn async_main() -> Result<(), CrawlError> {
                 &out_dir,
                 from_row,
                 to_row,
+                url_only,
             )
                 .await
                 .map_err(|e| CrawlError::Parse(format!("cafe-open 오류: {e}")))?;

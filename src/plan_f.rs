@@ -44,6 +44,7 @@ pub async fn run(
     out_dir: &str,
     from_row: usize,
     to_row: usize,
+    url_only: bool,
 ) -> Result<(), CrawlError> {
     info!("🚀 [Plan F] 미가입 네이버 카페 크롤링 시작");
     if let Some(url_csv) = url_csv {
@@ -109,12 +110,10 @@ pub async fn run(
     write_article_refs_csv(&urls_csv, &refs)
         .map_err(|e| CrawlError::Parse(format!("urls csv save failed: {e}")))?;
 
-    let refs = select_article_refs_by_range(refs, from_row, to_row);
-    if refs.is_empty() {
-        return Err(CrawlError::Parse(format!(
-            "selected row range is empty: from-row={from_row}, to-row={to_row}"
-        )));
-    }
+    let Some(refs) = detail_refs_after_url_save(refs, from_row, to_row, url_only)? else {
+        info!("URL CSV only mode complete: {}", urls_csv.display());
+        return Ok(());
+    };
 
     let total = refs.len();
     let queue: Arc<Mutex<VecDeque<ArticleRef>>> = Arc::new(Mutex::new(VecDeque::from(refs)));
@@ -340,6 +339,26 @@ fn select_article_refs_by_range(
         .collect()
 }
 
+fn detail_refs_after_url_save(
+    refs: Vec<ArticleRef>,
+    from_row: usize,
+    to_row: usize,
+    url_only: bool,
+) -> Result<Option<Vec<ArticleRef>>, CrawlError> {
+    if url_only {
+        return Ok(None);
+    }
+
+    let refs = select_article_refs_by_range(refs, from_row, to_row);
+    if refs.is_empty() {
+        return Err(CrawlError::Parse(format!(
+            "selected row range is empty: from-row={from_row}, to-row={to_row}"
+        )));
+    }
+
+    Ok(Some(refs))
+}
+
 fn output_suffix(from_row: usize, to_row: usize, collected_rows: usize) -> String {
     let end_row = if to_row == 0 {
         collected_rows
@@ -530,5 +549,14 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].title, "title 1");
         assert_eq!(loaded[1].url.as_str(), "https://cafe.naver.com/test/2");
+    }
+
+    #[test]
+    fn url_only_skips_detail_selection() {
+        let refs = (1..=3).map(article).collect::<Vec<_>>();
+
+        let selected = detail_refs_after_url_save(refs, 1, 0, true).unwrap();
+
+        assert!(selected.is_none());
     }
 }

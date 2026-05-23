@@ -47,6 +47,12 @@ cargo run --bin naver_crawler_engine -- smartstore --url "https://smartstore.nav
 cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/cafename/board" --max-posts 100 --workers 3 --webdriver http://localhost:4444 --out-dir out
 ```
 
+URL 목록만 저장하고 상세 수집은 하지 않으려면 `--url-only`를 붙입니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/cafename/board" --max-posts 100 --url-only --webdriver http://localhost:4444 --out-dir out
+```
+
 특정 행 범위만 수집할 수 있습니다. 행 번호는 수집된 URL 목록 기준 1부터 시작합니다.
 
 ```powershell
