@@ -17,6 +17,7 @@ mod plan_k;
 mod plan_m;
 mod plan_n;
 mod plan_o;
+mod plan_p;
 mod test_mode;
 mod plan_f;
 
@@ -286,6 +287,41 @@ enum Commands {
         /// Max clicks/pages for loading comments
         #[arg(long, default_value_t = 50)]
         comment_page_limit: usize,
+    },
+
+    /// Naver Knowledge iN question-only crawler (Plan P)
+    Kin {
+        /// Full Kin search URL
+        #[arg(long)]
+        url: String,
+
+        /// First search result page
+        #[arg(long, default_value_t = 1)]
+        start_page: usize,
+
+        /// Number of search result pages to scan
+        #[arg(long, default_value_t = 10)]
+        max_pages: usize,
+
+        /// Max question detail URLs to crawl (0 = no limit)
+        #[arg(long, default_value_t = 0)]
+        max_posts: usize,
+
+        /// Parallel HTTP workers for question detail pages
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+
+        /// Output directory
+        #[arg(long, default_value = "out")]
+        out_dir: String,
+
+        /// Delay between search result pages
+        #[arg(long, default_value_t = 500)]
+        page_delay_ms: u64,
+
+        /// Delay between detail requests per worker
+        #[arg(long, default_value_t = 300)]
+        detail_delay_ms: u64,
     },
 
     Threads {
@@ -856,6 +892,30 @@ async fn async_main() -> Result<(), CrawlError> {
             })
             .await
             .map_err(|e| CrawlError::Parse(format!("naver-search error: {e}")))?;
+        }
+
+        Commands::Kin {
+            url,
+            start_page,
+            max_pages,
+            max_posts,
+            workers,
+            out_dir,
+            page_delay_ms,
+            detail_delay_ms,
+        } => {
+            plan_p::run(plan_p::PlanPConfig {
+                search_url: url,
+                start_page,
+                max_pages,
+                max_posts,
+                workers,
+                out_dir,
+                page_delay_ms,
+                detail_delay_ms,
+            })
+            .await
+            .map_err(|e| CrawlError::Parse(format!("kin error: {e}")))?;
         }
 
         Commands::Threads {

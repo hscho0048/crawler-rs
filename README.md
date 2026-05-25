@@ -1,175 +1,304 @@
-# naver_crawler_engine
+# crawler-rs
 
-Rust 기반 크롤러 모음입니다. 대부분 ChromeDriver를 먼저 켠 뒤, 다른 터미널에서 `cargo run --bin naver_crawler_engine -- <subcommand> [options]` 형태로 실행합니다.
-
-## 1. 공통 준비
-
-작업 폴더로 이동합니다.
-
-```powershell
-cd C:\Users\choho\crawler-rs\crawler-rs
-```
-
-ChromeDriver를 실행합니다.
-
-```powershell
-.\chromedriver.exe --port=4444
-```
-
-Firefox/GeckoDriver로 `cafe-open`을 실행하려면 GeckoDriver를 대신 켭니다.
-
-```powershell
-.\geckodriver.exe --port 4444
-```
-
-Firefox를 병렬로 쓰려면 GeckoDriver를 포트별로 여러 개 켭니다. 포트 4444~4451이면 8개 워커용입니다.
-
-```powershell
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4444"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4445"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4446"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4447"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4448"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4449"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4450"
-Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4451"
-```
-
-다른 터미널에서 크롤러를 실행합니다.
+Rust로 만든 크롤러 모음입니다. 대부분의 기능은 아래 공통 형식으로 실행합니다.
 
 ```powershell
 cargo run --bin naver_crawler_engine -- <subcommand> [options]
 ```
 
-ChromeDriver 포트가 이미 사용 중이면 실행 중인 프로세스를 확인합니다.
+Instagram 전용 Plan L만 별도 바이너리입니다.
+
+```powershell
+cargo run --bin instagram -- [options]
+```
+
+## 0. 공통 준비
+
+작업 폴더로 이동합니다.
+
+```powershell
+cd C:\Users\choho\crawler-rs
+```
+
+빌드가 되는지 먼저 확인합니다.
+
+```powershell
+cargo build
+```
+
+전체 명령 목록을 봅니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- --help
+```
+
+각 명령의 옵션을 봅니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- kin --help
+cargo run --bin naver_crawler_engine -- cafe-open --help
+cargo run --bin naver_crawler_engine -- coupang --help
+```
+
+ChromeDriver가 필요한 Plan은 먼저 ChromeDriver를 켭니다. 이 repo에는 `chromedriver.exe`가 들어 있습니다.
+
+```powershell
+.\chromedriver.exe --port=4444
+```
+
+일부 기존 Plan의 기본 WebDriver 포트는 `9515`입니다. README 예시는 헷갈리지 않게 대부분 `--webdriver http://localhost:4444`를 직접 넘깁니다. 만약 9515로 켰다면 명령의 `--webdriver`도 같이 바꾸세요.
+
+```powershell
+.\chromedriver.exe --port=9515
+```
+
+ChromeDriver가 이미 떠 있는지 확인합니다.
 
 ```powershell
 Get-Process chromedriver -ErrorAction SilentlyContinue
 ```
 
-필요하면 종료 후 다시 켭니다.
+ChromeDriver를 강제로 내리고 다시 켭니다.
 
 ```powershell
 Stop-Process -Name chromedriver -Force
 .\chromedriver.exe --port=4444
 ```
 
-다른 포트를 쓰고 싶으면 ChromeDriver 포트와 `--webdriver` 값을 같이 바꿉니다.
+여러 worker를 진짜 병렬 브라우저로 돌리고 싶으면 포트를 여러 개 열 수 있습니다.
 
 ```powershell
-.\chromedriver.exe --port=9515
+Start-Process -FilePath ".\chromedriver.exe" -ArgumentList "--port=4444"
+Start-Process -FilePath ".\chromedriver.exe" -ArgumentList "--port=4445"
+Start-Process -FilePath ".\chromedriver.exe" -ArgumentList "--port=4446"
 ```
+
+## 1. Plan A + Plan B fallback: `crawl`
+
+목적: URL 파일이나 `--url`로 받은 네이버 블로그/카페 글을 HTTP 우선으로 수집하고, 필요하면 WebDriver fallback을 붙입니다.
+
+ChromeDriver 필요 여부:
+
+- Plan A만 쓰면 불필요
+- `--webdriver`, `--plan-b-pages`를 쓰면 필요
+
+URL 파일 형식:
+
+```text
+https://blog.naver.com/example/223000000000
+https://cafe.naver.com/example/12345
+```
+
+HTTP만으로 빠르게 수집합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-posts 100 --webdriver http://localhost:9515 --out-dir out
+cargo run --bin naver_crawler_engine -- crawl --input .\urls.txt --max-in-flight 100 --out-dir out
 ```
 
-빌드 확인 명령어입니다.
+URL을 직접 여러 개 넘깁니다.
 
 ```powershell
-cargo check --workspace
-cargo test plan_f --workspace
+cargo run --bin naver_crawler_engine -- crawl --url "https://blog.naver.com/example/223000000000" --url "https://cafe.naver.com/example/12345" --max-in-flight 50 --out-dir out
 ```
 
-## 2. 네이버 스마트스토어 리뷰
-
-URL 파일을 사용하는 기본 명령입니다. `url.txt`는 한 줄에 URL 하나씩 넣습니다.
+HTTP 실패분을 ChromeDriver로 fallback 처리합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- smartstore --input .\url.txt --workers 2 --webdriver http://localhost:4444 --output out\smartstore_reviews.csv
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- crawl --input .\urls.txt --max-in-flight 50 --webdriver http://localhost:4444 --plan-b-pages 3 --out-dir out
 ```
 
-URL을 직접 여러 개 넣을 수도 있습니다.
+출력:
+
+```text
+out\results.csv
+out\comments.csv
+```
+
+## 2. Plan B: `cafe`
+
+목적: 로그인 쿠키가 필요한 네이버 카페 게시판을 ChromeDriver로 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+쿠키 파일 형식:
+
+```json
+[
+  { "name": "NID_AUT", "value": "..." },
+  { "name": "NID_SES", "value": "..." }
+]
+```
+
+기본 실행:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- cafe --url "https://cafe.naver.com/cafename/board" --max-posts 100 --workers 3 --webdriver http://localhost:4444 --cookie-file .\cookies.json --out-dir out
+```
+
+쿠키 없이 공개 카페를 시험합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe --url "https://cafe.naver.com/cafename/board" --max-posts 20 --workers 1 --webdriver http://localhost:4444 --out-dir out
+```
+
+출력:
+
+```text
+out\results.csv
+out\comments.csv
+```
+
+## 3. Plan C: `scroll`
+
+목적: 무한 스크롤 목록 페이지에서 카드 링크를 모은 뒤 상세 글을 수집합니다. 기본 selector는 오늘의집 계열에 맞춰져 있습니다.
+
+ChromeDriver 필요 여부: 불필요. `chromiumoxide`가 Chrome/CDP를 직접 사용합니다.
+
+기본 실행:
+
+```powershell
+cargo run --bin naver_crawler_engine -- scroll --url "https://ohouse.example/list" --max-posts 50 --workers 3 --out-dir out
+```
+
+목록 카드 selector를 직접 지정합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- scroll --url "https://example.com/list" --card-selector "article.card" --link-selector "a" --max-posts 100 --workers 2 --scroll-pause 1500 --out-dir out
+```
+
+로그인 쿠키가 필요하면 JSON 쿠키 파일을 넘깁니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- scroll --url "https://example.com/list" --cookie-file .\cookies.json --max-posts 50 --workers 2 --out-dir out
+```
+
+출력:
+
+```text
+out\results.csv
+out\comments.csv
+```
+
+## 4. Plan D: `scrape`
+
+목적: DCInside 목록 페이지를 CDP로 수집합니다.
+
+ChromeDriver 필요 여부: 불필요. CDP 기반으로 Chrome을 직접 띄웁니다.
+
+기본 실행:
+
+```powershell
+cargo run --bin naver_crawler_engine -- scrape --url "https://gall.dcinside.com/board/lists/?id=toeic" --max-posts 100 --workers 2 --out-dir out
+```
+
+차단/불안정이 보이면 worker를 낮춥니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- scrape --url "https://gall.dcinside.com/board/lists/?id=toeic" --max-posts 50 --workers 1 --out-dir out
+```
+
+출력:
+
+```text
+out\results.csv
+out\comments.csv
+```
+
+## 5. Plan E: `smartstore`
+
+목적: 네이버 스마트스토어 상품 리뷰를 병렬 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+URL 파일 형식:
+
+```text
+https://smartstore.naver.com/store/products/111
+https://smartstore.naver.com/store/products/222
+```
+
+URL 파일로 실행:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- smartstore --input .\smartstore_urls.txt --workers 2 --webdriver http://localhost:4444 --output out\smartstore_reviews.csv
+```
+
+URL을 직접 여러 개 넘깁니다.
 
 ```powershell
 cargo run --bin naver_crawler_engine -- smartstore --url "https://smartstore.naver.com/store/products/111" --url "https://smartstore.naver.com/store/products/222" --workers 2 --webdriver http://localhost:4444 --output out\smartstore_reviews.csv
 ```
 
-한 줄씩 안정적으로 돌릴 때는 워커를 1로 둡니다.
+안정성 우선이면 worker를 1로 낮춥니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- smartstore --input .\url.txt --workers 1 --webdriver http://localhost:4444 --output out\smartstore_reviews.csv
+cargo run --bin naver_crawler_engine -- smartstore --input .\smartstore_urls.txt --workers 1 --webdriver http://localhost:4444 --output out\smartstore_reviews.csv
 ```
 
-## 3. 네이버 카페 공개/미가입 접근 크롤러
-
-`f-e/cafes/.../menus/...` 주소를 그대로 넣으면 됩니다. 가입/미가입 여부와 상관없이 먼저 목록 URL을 수집하고, 상세 글은 별도 워커로 수집합니다.
-
-URL만 저장하려면 `--url-only`를 붙입니다.
+headless로 실행:
 
 ```powershell
+cargo run --bin naver_crawler_engine -- smartstore --input .\smartstore_urls.txt --workers 2 --webdriver http://localhost:4444 --headless --output out\smartstore_reviews.csv
+```
+
+출력:
+
+```text
+out\smartstore_reviews.csv
+```
+
+## 6. Plan F: `cafe-open`
+
+목적: 네이버 카페 공개/미로그인 접근 가능한 `f-e/cafes/.../menus/...` 목록에서 URL을 먼저 수집하고, 필요하면 상세 글까지 수집합니다.
+
+ChromeDriver 또는 GeckoDriver 필요 여부: 필요
+
+URL만 먼저 모읍니다. 대량 작업 전에는 이 모드가 제일 안전합니다.
+
+```powershell
+.\chromedriver.exe --port=4444
 cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-posts 500 --list-workers 5 --url-only --webdriver http://localhost:4444 --out-dir out
 ```
 
-GeckoDriver를 쓸 때는 `--browser firefox`를 붙입니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 10 --list-workers 1 --url-only --browser firefox --webdriver http://localhost:4444 --out-dir out
-```
-
-GeckoDriver 여러 포트를 워커에 분산하려면 `--webdriver`를 반복해서 넘깁니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 200 --list-workers 8 --url-only --browser firefox --webdriver http://localhost:4444 --webdriver http://localhost:4445 --webdriver http://localhost:4446 --webdriver http://localhost:4447 --webdriver http://localhost:4448 --webdriver http://localhost:4449 --webdriver http://localhost:4450 --webdriver http://localhost:4451 --out-dir out
-```
-
-URL 수집과 상세 수집을 한 번에 실행합니다.
+URL 수집과 상세 수집을 한 번에 합니다.
 
 ```powershell
 cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-posts 500 --list-workers 5 --workers 3 --webdriver http://localhost:4444 --out-dir out
 ```
 
-목록 페이지 수를 직접 지정하려면 `--max-pages`를 씁니다. 아래 명령은 `page=1&size=50` 기준으로 1페이지부터 10페이지까지 URL을 수집합니다.
+페이지 수를 직접 지정합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 10 --list-workers 5 --url-only --webdriver http://localhost:4444 --out-dir out
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 20 --list-workers 4 --url-only --webdriver http://localhost:4444 --out-dir out
 ```
 
-카페 사이드바의 게시판 링크를 전부 읽어서 게시판별 `cafe-open` 명령어를 `.ps1` 파일로 만들 수 있습니다. 생성되는 URL은 `page=1&size=50` 쿼리 형식입니다.
+이미 저장된 URL CSV에서 일부 행만 상세 수집합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-posts 50000 --list-workers 10 --webdriver http://localhost:4444 --out-dir out
+cargo run --bin naver_crawler_engine -- cafe-open --url-csv "out\cafe_open_rows_001-500_20260525_120000_urls.csv" --from-row 1 --to-row 50 --workers 3 --webdriver http://localhost:4444 --out-dir out
 ```
 
-마지막 페이지를 아는 게시판들만 페이지 기준으로 돌리고 싶으면 `--max-pages`를 넣습니다.
+Firefox/GeckoDriver로 실행합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-pages 57 --list-workers 10 --webdriver http://localhost:4444 --out-dir out
+.\geckodriver.exe --port 4444
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 10 --list-workers 1 --url-only --browser firefox --webdriver http://localhost:4444 --out-dir out
 ```
 
-GeckoDriver 여러 포트용 명령어도 같은 방식으로 생성할 수 있습니다.
+GeckoDriver 포트를 여러 개 열고 목록 수집 worker에 분산합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --browser firefox --max-posts 50000 --list-workers 8 --webdriver http://localhost:4444 --webdriver http://localhost:4445 --webdriver http://localhost:4446 --webdriver http://localhost:4447 --webdriver http://localhost:4448 --webdriver http://localhost:4449 --webdriver http://localhost:4450 --webdriver http://localhost:4451 --out-dir out
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4444"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4445"
+Start-Process -FilePath ".\geckodriver.exe" -ArgumentList "--port","4446"
+
+cargo run --bin naver_crawler_engine -- cafe-open --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0?viewType=L&page=1&size=50" --max-pages 100 --list-workers 3 --url-only --browser firefox --webdriver http://localhost:4444 --webdriver http://localhost:4445 --webdriver http://localhost:4446 --out-dir out
 ```
 
-생성 파일은 기본적으로 `out\cafe_menu_commands_YYYYMMDD_HHMMSS.ps1` 이름으로 저장됩니다.
-이 스크립트를 실행하면 각 게시판은 `--url-only`로 URL CSV만 수집하고, 마지막에 `url` 기준 중복 제거를 해서 최종 파일 하나를 만듭니다.
-
-```text
-out\cafe_menu_urls_deduped_YYYYMMDD_HHMMSS.csv
-```
-
-`--list-workers`는 목록 URL 수집용 워커 수입니다. `--workers`는 상세 글 수집용 워커 수입니다.
-
-```text
---list-workers 5  = 목록 1, 2, 3, 4, 5페이지를 여러 Chrome 세션이 나눠 수집
---workers 3       = 수집된 글 URL 상세 페이지를 3개 Chrome 세션이 나눠 수집
-```
-
-이전 실행에서 저장된 URL CSV만으로 상세 수집을 다시 실행할 수 있습니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- cafe-open --url-csv "out\cafe_open_rows_001-500_20260523_120000_urls.csv" --from-row 1 --to-row 50 --workers 3 --webdriver http://localhost:4444 --out-dir out
-```
-
-특정 행만 다시 수집할 때는 `--from-row`, `--to-row`를 씁니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- cafe-open --url-csv "out\cafe_open_rows_001-500_20260523_120000_urls.csv" --from-row 51 --to-row 100 --workers 3 --webdriver http://localhost:4444 --out-dir out
-```
-
-출력 파일명은 실행 시각 기준으로 자동 생성됩니다.
+출력 파일은 실행 시각과 행 범위가 붙습니다.
 
 ```text
 out\cafe_open_rows_001-500_YYYYMMDD_HHMMSS_urls.csv
@@ -177,144 +306,461 @@ out\cafe_open_rows_001-500_YYYYMMDD_HHMMSS_results.csv
 out\cafe_open_rows_001-500_YYYYMMDD_HHMMSS_comments.csv
 ```
 
-`results.csv`의 `comments` 컬럼은 여러 댓글을 ` | `로 합쳐 한 행에 저장합니다. 댓글을 행 단위로 따로 보려면 `comments.csv`를 사용합니다.
+## 7. Plan F helper: `cafe-menu-commands`
 
-## 4. 쿠팡 리뷰
+목적: 카페 사이드바 메뉴 목록을 읽어서 메뉴별 `cafe-open` 실행 스크립트를 자동 생성합니다.
 
-기본 API 수집 명령입니다. 작업 단위는 `상품 URL + 리뷰 페이지 번호`입니다.
+ChromeDriver 또는 GeckoDriver 필요 여부: 필요
 
-```powershell
-cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 3 --output out\coupang_reviews_001_010.csv
-```
-
-11페이지부터 20페이지까지 이어서 수집합니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 11 --max-pages 10 --workers 3 --output out\coupang_reviews_011_020.csv
-```
-
-URL 파일을 사용할 수도 있습니다. `coupang_urls.txt`는 한 줄에 상품 URL 하나씩 넣습니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- coupang --input .\coupang_urls.txt --start-page 1 --max-pages 10 --workers 3 --output out\coupang_reviews.csv
-```
-
-403 Access Denied가 나오면 브라우저에서 복사한 Cookie 헤더를 파일에 저장하고 `--cookie-file`을 붙입니다.
-
-```powershell
-cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie-file .\coupang_cookie.txt --page-delay-ms 1500 --output out\coupang_reviews.csv
-```
-
-쿠키를 넣어도 403이면 ChromeDriver를 켠 뒤 `--browser-fetch`를 사용합니다.
+기본 실행:
 
 ```powershell
 .\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-posts 50000 --list-workers 10 --webdriver http://localhost:4444 --out-dir out
 ```
+
+각 메뉴의 최대 페이지 수를 지정합니다.
 
 ```powershell
-cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie-file .\coupang_cookie.txt --browser-fetch --webdriver http://localhost:4444 --page-delay-ms 1500 --output out\coupang_reviews.csv
+cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-pages 57 --list-workers 10 --webdriver http://localhost:4444 --out-dir out
 ```
 
-출력 컬럼은 아래와 같습니다.
+출력 스크립트 이름을 직접 지정합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- cafe-menu-commands --url "https://cafe.naver.com/f-e/cafes/17902534/menus/0" --max-posts 50000 --list-workers 10 --webdriver http://localhost:4444 --out-dir out --output out\run_cafe_menus.ps1
+```
+
+생성된 스크립트를 실행합니다.
+
+```powershell
+.\out\run_cafe_menus.ps1
+```
+
+기본 출력:
 
 ```text
-product_url, product_id, page, idx_in_page, product_title, product_option, author, rating, date, helpful_count, headline, review_body, survey_answer, raw_text
+out\cafe_menu_commands_YYYYMMDD_HHMMSS.ps1
+out\cafe_menu_urls_deduped_YYYYMMDD_HHMMSS.csv
 ```
 
-## 5. 잇다 커뮤니티
+## 8. Plan G: `reddit`
 
-처음 실행하면 로그인용 Chrome 창이 뜹니다. 로그인 후 터미널에서 Enter를 누르면 `/community?page=1`로 돌아가 URL을 수집하고, 각 글의 날짜, 본문, 댓글을 수집합니다.
+목적: Reddit 공개 JSON API로 게시글과 댓글을 수집합니다.
+
+ChromeDriver 필요 여부: 불필요
+
+특정 subreddit 최신글:
 
 ```powershell
-cargo run --bin naver_crawler_engine -- itda-community --start-page 1 --max-pages 2 --workers 10 --webdriver http://localhost:4444 --out-dir out
+cargo run --bin naver_crawler_engine -- reddit --subreddit minimalism --sort new --limit 100 --max-pages 3 --max-comments 200 --workers 5 --out-dir out
 ```
 
-전체 페이지 수를 길게 잡는 예시입니다.
+Reddit 전체 검색:
+
+```powershell
+cargo run --bin naver_crawler_engine -- reddit --search-query "rust crawler" --sort relevance --limit 100 --max-pages 2 --max-comments 100 --workers 5 --out-dir out
+```
+
+키워드 필터를 여러 개 적용합니다. 제목+본문에 키워드가 있는 게시글만 남깁니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- reddit --subreddit all --search-query "naver" --keyword crawler --keyword rust --limit 100 --max-pages 2 --max-comments 100 --workers 5 --user-agent "windows:crawler-rs:v1.0 (by /u/yourname)" --out-dir out
+```
+
+출력:
+
+```text
+out\reddit_posts.csv
+out\reddit_comments.csv
+```
+
+## 9. Plan H: `blog-search`
+
+목적: 네이버 블로그 검색에서 키워드와 기간으로 글을 찾고, 본문과 댓글을 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+기본 실행:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- blog-search --query "바퀴벌레" --start-date 2026-05-01 --end-date 2026-05-25 --max-posts 30 --workers 3 --webdriver http://localhost:4444 --out-dir out
+```
+
+검색 결과를 더 많이 스크롤하고 상세 페이지도 더 많이 스크롤합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- blog-search --query "바퀴벌레" --start-date 2026-05-01 --end-date 2026-05-25 --max-posts 100 --workers 3 --webdriver http://localhost:4444 --out-dir out --search-max-scrolls 80 --detail-max-scrolls 20
+```
+
+출력:
+
+```text
+out\<query>_<start>_<end>_posts.csv
+out\<query>_<start>_<end>_comments.csv
+```
+
+## 10. Plan I: `threads`
+
+목적: Threads 키워드 검색 결과와 댓글을 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+기본 실행:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- threads --keyword "바퀴벌레" --max-posts 30 --workers 3 --webdriver http://localhost:4444 --out-dir out
+```
+
+댓글 스크롤을 더 많이 합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- threads --keyword "바퀴벌레" --max-posts 100 --workers 3 --webdriver http://localhost:4444 --out-dir out --comment-scroll-rounds 20 --comment-pause-secs 2
+```
+
+출력:
+
+```text
+out\threads_<keyword>.csv
+out\threads_<keyword>.xlsx
+```
+
+## 11. Plan J: `amazon`
+
+목적: Amazon 상품 리뷰를 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+처음 실행은 브라우저 로그인/쿠키 저장이 필요할 수 있습니다.
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- amazon --url "https://www.amazon.com/product-reviews/ASIN" --max-reviews 100 --workers 3 --webdriver http://localhost:4444 --out-dir amazon_output
+```
+
+URL 파일로 실행:
+
+```powershell
+cargo run --bin naver_crawler_engine -- amazon --input .\amazon_review_urls.txt --max-reviews 200 --workers 3 --webdriver http://localhost:4444 --out-dir amazon_output
+```
+
+저장된 쿠키 파일을 사용합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- amazon --input .\amazon_review_urls.txt --max-reviews 200 --workers 3 --webdriver http://localhost:4444 --cookie-file amazon_output\cookies.json --out-dir amazon_output
+```
+
+Read More 클릭을 끕니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- amazon --url "https://www.amazon.com/product-reviews/ASIN" --max-reviews 100 --workers 2 --webdriver http://localhost:4444 --no-read-more --out-dir amazon_output
+```
+
+출력:
+
+```text
+amazon_output\amazon_reviews.csv
+```
+
+## 12. Plan K: `goodreads`
+
+목적: Goodreads 리뷰 페이지를 무한 스크롤하며 리뷰를 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+기본 실행:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- goodreads --url "https://www.goodreads.com/book/show/BOOK_ID" --workers 3 --webdriver http://localhost:4444 --max-reviews 300 --out-dir goodreads_output
+```
+
+URL 파일로 실행:
+
+```powershell
+cargo run --bin naver_crawler_engine -- goodreads --input .\goodreads_urls.txt --workers 3 --webdriver http://localhost:4444 --max-reviews 300 --out-dir goodreads_output
+```
+
+로그인 세션 프로필과 쿠키 파일을 지정합니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- goodreads --input .\goodreads_urls.txt --workers 2 --webdriver http://localhost:4444 --profile-dir goodreads_profile --cookie-file goodreads_output\cookies.json --max-reviews 0 --max-idle-rounds 5 --out-dir goodreads_output
+```
+
+출력:
+
+```text
+goodreads_output\goodreads_reviews.csv
+```
+
+## 13. Plan L: `instagram` 별도 바이너리
+
+목적: Instagram hashtag/keyword 기준으로 게시글 URL, 본문, 댓글을 수집합니다.
+
+ChromeDriver 필요 여부: 자동으로 chromedriver 프로세스를 재시작하는 로직이 있습니다. 기본 WebDriver URL은 `http://localhost:4444`입니다.
+
+환경 변수 파일 `.env` 예시:
+
+```text
+IG_USERNAME=your_instagram_id
+IG_PASSWORD=your_instagram_password
+WEBDRIVER_URL=http://localhost:4444
+HEADLESS=false
+```
+
+키워드 파일 `keywords.txt` 예시:
+
+```text
+cockroach
+naver
+rustcrawler
+```
+
+URL만 먼저 수집:
+
+```powershell
+cargo run --bin instagram -- --input .\keywords.txt --output-dir out\instagram --max-posts 100 --workers 1 --urls-only
+```
+
+이미 수집한 URL 파일에서 상세 수집:
+
+```powershell
+cargo run --bin instagram -- --input .\keywords.txt --output-dir out\instagram --max-posts 100 --max-comments 200 --min-comment-len 2 --workers 1 --from-urls
+```
+
+한 번에 URL과 상세를 수집:
+
+```powershell
+cargo run --bin instagram -- --input .\keywords.txt --output-dir out\instagram --max-posts 50 --max-comments 100 --workers 1
+```
+
+JSON config를 씁니다.
+
+```powershell
+cargo run --bin instagram -- --config .\instagram_config.json --input .\keywords.txt --output-dir out\instagram --max-posts 50 --workers 1
+```
+
+출력:
+
+```text
+out\instagram\<keyword>_urls.txt
+out\instagram\<keyword>_insta.csv
+out\instagram\<keyword>_comments.csv
+```
+
+## 14. Plan M: `itda-community`
+
+목적: 잇다 커뮤니티 목록과 글 상세를 수집합니다.
+
+ChromeDriver 필요 여부: 필요
+
+처음 실행하면 로그인용 Chrome이 열릴 수 있습니다. 로그인 후 터미널에서 Enter를 누르면 계속 진행합니다.
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- itda-community --start-page 1 --max-pages 2 --workers 3 --webdriver http://localhost:4444 --out-dir out --profile-dir target\itda_login_profile
+```
+
+전체 페이지를 길게 수집:
 
 ```powershell
 cargo run --bin naver_crawler_engine -- itda-community --start-page 1 --max-pages 43 --max-posts 0 --workers 3 --webdriver http://localhost:4444 --out-dir out --profile-dir target\itda_login_profile
 ```
 
-출력 파일입니다.
+특정 개수까지만 수집:
+
+```powershell
+cargo run --bin naver_crawler_engine -- itda-community --start-page 1 --max-pages 43 --max-posts 100 --workers 3 --webdriver http://localhost:4444 --out-dir out
+```
+
+출력:
 
 ```text
 out\itda_community.csv
 ```
 
-댓글이 여러 개면 `comment_body`에 ` | `로 합쳐 저장합니다.
+## 15. Plan N: `naver-search`
 
-## 6. 네이버 검색 / 블로그 / 티스토리
+목적: 네이버 통합 검색 결과에서 네이버 블로그/Tistory URL을 모으고 본문과 댓글을 수집합니다.
 
-테스트로 10개만 수집합니다.
+ChromeDriver 필요 여부: 필요
 
-```powershell
-cargo run --bin naver_crawler_engine -- naver-search --url "https://search.naver.com/search.naver?ssc=tab.blog.all&query=..." --max-posts 10 --max-scrolls 5 --workers 2 --webdriver http://localhost:4444 --out-dir out --comment-page-limit 20
-```
-
-무한 스크롤 결과를 많이 수집하려면 `--max-posts 0`으로 두고 `--max-scrolls`를 크게 잡습니다.
+소량 테스트:
 
 ```powershell
-cargo run --bin naver_crawler_engine -- naver-search --url "https://search.naver.com/search.naver?ssc=tab.blog.all&query=..." --max-posts 0 --max-scrolls 80 --workers 3 --webdriver http://localhost:4444 --out-dir out --comment-page-limit 50
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- naver-search --url "https://search.naver.com/search.naver?ssc=tab.blog.all&query=%EB%B0%94%ED%80%B4%EB%B2%8C%EB%A0%88" --max-posts 10 --max-scrolls 5 --workers 2 --webdriver http://localhost:4444 --out-dir out --comment-page-limit 20
 ```
 
-출력 파일입니다.
+대량 수집:
+
+```powershell
+cargo run --bin naver_crawler_engine -- naver-search --url "https://search.naver.com/search.naver?ssc=tab.blog.all&query=%EB%B0%94%ED%80%B4%EB%B2%8C%EB%A0%88" --max-posts 0 --max-scrolls 80 --workers 3 --webdriver http://localhost:4444 --out-dir out --comment-page-limit 50
+```
+
+댓글을 많이 펼치지 않게 제한:
+
+```powershell
+cargo run --bin naver_crawler_engine -- naver-search --url "https://search.naver.com/search.naver?ssc=tab.blog.all&query=test" --max-posts 30 --max-scrolls 10 --workers 2 --webdriver http://localhost:4444 --out-dir out --comment-page-limit 5
+```
+
+출력:
 
 ```text
 out\naver_search_posts.csv
 out\naver_search_comments.csv
 ```
 
-`naver_search_posts.csv`의 `comments` 컬럼은 여러 댓글을 ` | `로 합쳐 저장합니다. 댓글을 별도 행으로 분석하려면 `naver_search_comments.csv`를 사용합니다.
+## 16. Plan O: `coupang`
 
-## 7. 자주 쓰는 옵션
+목적: Coupang 상품 리뷰 API 또는 브라우저 fetch 모드로 리뷰를 수집합니다.
 
-`--workers`는 상세 페이지를 동시에 열 Chrome 세션 수입니다. 안정성이 중요하면 `1`, 속도가 중요하면 PC 사양에 맞춰 `3~10` 사이에서 조절합니다.
+ChromeDriver 필요 여부:
 
-`--list-workers`는 카페 목록 URL 수집 전용 워커 수입니다. `cafe-open`에서만 사용합니다.
+- 기본 API 모드: 불필요
+- `--browser-fetch`: 필요
 
-`--browser firefox`는 `cafe-open`을 GeckoDriver/Firefox로 실행할 때 씁니다. 생략하면 기본값은 Chrome입니다. Firefox는 GeckoDriver 포트 하나당 세션 하나라서 병렬 수집 시 `--webdriver`를 여러 번 넘겨야 합니다.
-
-`--max-posts`는 최대 수집 글 수입니다. 카페에서 `page=1&size=50 --max-posts 500`이면 대략 10페이지를 대상으로 URL을 모읍니다.
-
-`--max-pages`는 페이지 수를 직접 지정할 때 씁니다.
-
-네이버 카페 목록 페이지는 최대 1000페이지까지만 요청합니다. `--max-posts`나 `--max-pages` 값이 더 커도 `page=1001` 이상은 만들지 않습니다.
-
-`--url-only`는 URL CSV만 저장하고 상세 수집을 건너뜁니다.
-
-`--from-row`, `--to-row`는 저장된 URL CSV 기준으로 특정 행 범위만 상세 수집할 때 씁니다.
-
-`cafe-open`의 페이지 로드 timeout은 180초입니다. URL만 수집할 때 게시글 목록 테이블을 기다리는 시간도 최대 180초입니다. 느린 카페 페이지나 Chrome 렌더러 지연 때문에 30초 전후로 끊기는 문제를 피하려고 길게 잡아두었습니다.
-
-## 8. Git 커밋 / 푸쉬
-
-현재 변경사항을 확인합니다.
+기본 API 모드:
 
 ```powershell
-git status
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 3 --output out\coupang_reviews_001_010.csv
 ```
 
-이번 작업 파일을 스테이징합니다.
+11~20페이지 이어서 수집:
 
 ```powershell
-git add README.md src/main.rs src/plan_b.rs src/plan_f.rs src/plan_o.rs
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 11 --max-pages 10 --workers 3 --output out\coupang_reviews_011_020.csv
 ```
 
-커밋합니다.
+URL 파일로 실행:
 
 ```powershell
-git commit -m "feat: add crawler command workflows"
+cargo run --bin naver_crawler_engine -- coupang --input .\coupang_urls.txt --start-page 1 --max-pages 10 --workers 3 --output out\coupang_reviews.csv
 ```
 
-현재 브랜치 그대로 원격에 푸쉬합니다.
+Cookie 헤더를 직접 넘깁니다.
 
 ```powershell
-git push origin HEAD
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie "PCID=...; sid=..." --page-delay-ms 1500 --output out\coupang_reviews.csv
 ```
 
-브랜치 이름을 확인하고 명시적으로 푸쉬하려면 아래처럼 실행합니다.
+Cookie 파일을 씁니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie-file .\coupang_cookie.txt --page-delay-ms 1500 --output out\coupang_reviews.csv
+```
+
+403이 계속 나면 브라우저 fetch 모드:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- coupang --url "https://www.coupang.com/vp/products/1524451385?vendorItemId=70606707327" --start-page 1 --max-pages 10 --workers 1 --cookie-file .\coupang_cookie.txt --browser-fetch --webdriver http://localhost:4444 --page-delay-ms 1500 --output out\coupang_reviews.csv
+```
+
+출력:
+
+```text
+out\coupang_reviews.csv
+```
+
+## 17. Plan P: `kin`
+
+목적: 네이버 지식iN 검색 결과에서 상세 질문 URL을 먼저 모은 뒤, 질문 상세만 수집합니다. 답변은 수집하지 않습니다.
+
+ChromeDriver 필요 여부: 불필요. HTTP로 수집합니다.
+
+가장 기본 실행:
+
+```powershell
+cargo run --bin naver_crawler_engine -- kin --url "https://kin.naver.com/search/list.naver?query=%EB%B0%94%ED%80%B4%EB%B2%8C%EB%A0%88" --max-pages 10 --max-posts 100 --workers 3 --out-dir out
+```
+
+2페이지부터 5페이지를 수집:
+
+```powershell
+cargo run --bin naver_crawler_engine -- kin --url "https://kin.naver.com/search/list.naver?query=%EB%B0%94%ED%80%B4%EB%B2%8C%EB%A0%88" --start-page 2 --max-pages 5 --max-posts 50 --workers 3 --out-dir out
+```
+
+차단이 의심되면 딜레이를 늘립니다.
+
+```powershell
+cargo run --bin naver_crawler_engine -- kin --url "https://kin.naver.com/search/list.naver?query=%EB%B0%94%ED%80%B4%EB%B2%8C%EB%A0%88" --max-pages 20 --max-posts 200 --workers 1 --page-delay-ms 1500 --detail-delay-ms 1000 --out-dir out
+```
+
+출력:
+
+```text
+out\kin_search_results.csv
+out\kin_questions.csv
+```
+
+`kin_search_results.csv`에는 검색 결과 목록의 제목, URL, 날짜, 요약, 카테고리, 답변수, 추천수, 썸네일 URL이 들어갑니다.
+
+`kin_questions.csv`에는 상세 질문의 제목, 작성자, 작성일, 조회수, 카테고리, 질문 본문, 질문 이미지 URL JSON이 들어갑니다. 답변 본문은 의도적으로 저장하지 않습니다.
+
+## 18. `test`
+
+목적: 단일 URL에 대해 사전 점검을 합니다.
+
+ChromeDriver가 필요 없는 점검:
+
+```powershell
+cargo run --bin naver_crawler_engine -- test --url "https://blog.naver.com/example/223000000000" --out-dir out
+```
+
+WebDriver까지 같이 점검:
+
+```powershell
+.\chromedriver.exe --port=4444
+cargo run --bin naver_crawler_engine -- test --url "https://blog.naver.com/example/223000000000" --webdriver http://localhost:4444 --out-dir out
+```
+
+## 19. 자주 조정하는 옵션
+
+`--workers`는 상세 페이지를 동시에 처리하는 개수입니다. 빠르게 돌리고 싶으면 키우고, 차단/타임아웃이 보이면 1~2로 낮춥니다.
+
+`--list-workers`는 `cafe-open`에서 목록 페이지 URL 수집에 쓰는 worker 수입니다. 상세 수집 worker인 `--workers`와 다릅니다.
+
+`--max-posts 0`은 보통 제한 없음이라는 뜻입니다. 단, Plan마다 실제 종료 조건은 페이지 끝, 스크롤 안정화, idle round 등에 따라 다릅니다.
+
+`--max-pages`는 페이지 번호를 직접 넘기는 방식의 Plan에서 몇 페이지를 볼지 정합니다. `kin`, `coupang`, `cafe-open`, `itda-community`에서 자주 씁니다.
+
+`--out-dir`는 결과 폴더입니다. 단, `smartstore`와 `coupang`은 `--output`으로 CSV 파일명을 직접 받습니다.
+
+`--cookie-file`은 사이트별로 형식이 다를 수 있습니다. 네이버 계열은 보통 JSON cookie array, 쿠팡은 raw Cookie 헤더 또는 JSON cookie array를 받습니다.
+
+PowerShell에서 URL에 `&`가 들어가면 반드시 URL 전체를 큰따옴표로 감싸세요.
+
+## 20. Git commit / push
+
+현재 브랜치 확인:
 
 ```powershell
 git branch --show-current
-git push origin 브랜치명
+```
+
+현재 이 작업 기준으로 올릴 파일:
+
+```powershell
+git add README.md src/main.rs src/plan_p.rs
+```
+
+커밋:
+
+```powershell
+git commit -m "feat: add kin crawler and command docs"
+```
+
+현재 브랜치는 `main`, remote는 `origin`입니다. 그대로 푸쉬:
+
+```powershell
+git push origin main
+```
+
+브랜치가 main이 아닐 때는 현재 브랜치 그대로 upstream을 잡아서 푸쉬합니다.
+
+```powershell
+git push -u origin HEAD
 ```
